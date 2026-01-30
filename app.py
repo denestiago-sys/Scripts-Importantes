@@ -1,39 +1,54 @@
 import streamlit as st
-# ... (suas funções de parse: normalize, extract_fields, etc., ficam aqui)
+import pdfplumber
+import pandas as pd
+from openpyxl import load_workbook
+import io
+
+# --- FUNÇÕES DE APOIO ---
+def extract_lines_from_pdf_file(pdf_file):
+    lines = []
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                lines.extend(text.split('\n'))
+    return lines
 
 def main():
-    st.set_page_config(page_title="Extrator PDF", layout="wide")
+    st.set_page_config(page_title="Conversor Portaria 685", page_icon="📄")
+    
     st.title("📄 Conversor Portaria 685")
+    st.markdown("Suba o PDF e a planilha modelo para gerar o arquivo preenchido.")
 
-    with st.sidebar:
-        st.header("Upload")
-        pdf_file = st.file_uploader("PDF de Entrada", type="pdf")
-        xlsx_template = st.file_uploader("Planilha Modelo", type="xlsx")
+    # Upload dos arquivos
+    pdf_file = st.file_uploader("PDF de Entrada", type="pdf")
+    excel_file = st.file_uploader("Planilha Modelo", type="xlsx")
 
-    if pdf_file and xlsx_template:
-        if st.button("Processar Arquivos"):
-            # Ajuste para ler direto da memória do browser
-            lines = extract_lines_from_pdf_file(pdf_file)
-            parsed_items = parse_items(lines)
-            
-            if not parsed_items:
-                st.error("Nenhum item encontrado.")
-                return
+    if pdf_file and excel_file:
+        if st.button("Processar e Gerar Planilha"):
+            try:
+                # 1. Extração
+                lines = extract_lines_from_pdf_file(pdf_file)
+                
+                # 2. Processamento (Sua lógica de dados aqui)
+                # Exemplo simples: criando um DataFrame com as linhas
+                df_pdf = pd.DataFrame(lines, columns=["Conteúdo PDF"])
 
-            # header_map usando o arquivo vindo do upload
-            _, header_map = get_template_header_info(xlsx_template)
-            rows = build_rows(parsed_items, header_map)
-            
-            # Gera o Excel em memória
-            excel_bytes = generate_excel_bytes(xlsx_template, rows, header_map)
-            
-            st.success(f"Pronto! {len(rows)} itens processados.")
-            st.download_button(
-                label="📥 Baixar Planilha Preenchida",
-                data=excel_bytes,
-                file_name="resultado.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                # 3. Preparar Excel em memória
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_pdf.to_excel(writer, index=False, sheet_name='Resultado')
+                
+                st.success("✅ Processamento concluído!")
+                
+                st.download_button(
+                    label="📥 Baixar Resultado",
+                    data=output.getvalue(),
+                    file_name="portaria_processada.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            except Exception as e:
+                st.error(f"Ocorreu um erro: {e}")
 
 if __name__ == "__main__":
     main()
