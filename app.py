@@ -3,11 +3,12 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 import io
+import re
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-# --- FUNÇÕES DE LÓGICA (ANTIGO PREENCHER_PLANILHA.PY) ---
+# --- FUNÇÕES DE LÓGICA DE EXTRAÇÃO ---
 
 def extract_lines_from_pdf_file(pdf_file):
     lines = []
@@ -20,31 +21,53 @@ def extract_lines_from_pdf_file(pdf_file):
 
 def parse_items(lines):
     """
-    Sua lógica de extração de itens do PDF. 
-    Aqui deve conter as regras para encontrar Número da Meta, Item, etc.
+    Lógica para extrair dados das Portarias. 
+    Ajustada para identificar Metas, Itens e Valores.
     """
     items = []
-    # Exemplo de estrutura que seu script build_rows espera:
-    # for line in lines: ... lógica de captura ...
-    # items.append({"Número da Meta Específica": "01", "Número do Item": "1", ...})
+    current_meta = ""
     
-    # IMPORTANTE: Como não tenho seu parse_items original completo, 
-    # certifique-se de que a lógica de captura de dados está aqui dentro.
+    # Regex para identificar padrões (Ex: Item 1, Meta 02, R$ 1.000,00)
+    re_meta = re.compile(r"(?:Meta|META)\s*[:\-\s]*(\d+)", re.IGNORECASE)
+    re_item = re.compile(r"(?:Item|ITEM)\s*[:\-\s]*(\d+)", re.IGNORECASE)
+    re_valor = re.compile(r"R\$\s?(\d{1,3}(?:\.\d{3})*,\d{2})")
+
+    for line in lines:
+        # Tenta identificar a Meta atual
+        meta_match = re_meta.search(line)
+        if meta_match:
+            current_meta = meta_match.group(1)
+        
+        # Tenta identificar um Item e Valor na linha
+        item_match = re_item.search(line)
+        valor_match = re_valor.search(line)
+        
+        if item_match:
+            valor = valor_match.group(1) if valor_match else ""
+            # Adiciona o dicionário com as chaves que sua planilha espera
+            items.append({
+                "Número da Meta Específica": current_meta,
+                "Número do Item": item_match.group(1),
+                "Descrição": line.strip(), # Pega a linha toda como descrição inicial
+                "Valor Unitário": valor
+            })
+            
     return items 
 
 def get_template_header_info(template_path):
     wb = load_workbook(template_path, data_only=True)
     ws = wb.active
     header_map = {}
-    # Assume que o cabeçalho está na linha 2 (ajuste se necessário)
+    # Lê o cabeçalho na linha 2 (ajuste se a sua planilha for na linha 1)
     for cell in ws[2]: 
         if cell.value:
-            header_map[cell.value] = cell.column
+            header_map[str(cell.value).strip()] = cell.column
     return wb, header_map
 
 def build_rows(parsed_items, header_map):
     rows = []
     for item in parsed_items:
+        # Mapeia os dados extraídos para as colunas exatas do Excel
         row_data = {header: item.get(header, "") for header in header_map.keys()}
         rows.append(row_data)
     return rows
@@ -52,83 +75,84 @@ def build_rows(parsed_items, header_map):
 def generate_excel_bytes(template_path, rows, header_map):
     wb = load_workbook(template_path)
     ws = wb.active
-    start_row = 3
+    start_row = 3 # Começa a preencher na linha 3
+    
     for i, row_data in enumerate(rows):
         for header, col_idx in header_map.items():
-            ws.cell(row=start_row + i, column=col_idx, value=row_data.get(header))
+            valor = row_data.get(header, "")
+            ws.cell(row=start_row + i, column=col_idx, value=valor)
     
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
 
-# --- INTERFACE STREAMLIT (SEU CÓDIGO) ---
+# --- INTERFACE STREAMLIT ---
 
 BASE_DIR = Path(__file__).resolve().parent
-# Nota: O arquivo 'Planilha Base.xlsx' precisa estar no seu GitHub!
 TEMPLATE_PATH = BASE_DIR / "Planilha Base.xlsx"
 LOGO_PATH = BASE_DIR / "Logo.png"
 
 st.set_page_config(page_title="Preenche Planilhas", page_icon="📄", layout="centered")
 
-# [O SEU CSS AQUI - MANTIDO IGUAL]
-st.markdown("""<style>...</style>""", unsafe_allow_html=True) 
+# CSS para estilo FAF
+st.markdown("""
+    <style>
+    .header { display: flex; align-items: center; gap: 16px; }
+    .header-title { font-size: 1.6rem !important; font-weight: 600; margin: 0; }
+    .logo-wrap { width: 64px; height: 64px; border-radius: 16px; overflow: hidden; border: 1px solid #e6e6e6; }
+    .logo-wrap img { width: 64px; height: 64px; object-fit: cover; }
+    .brand-bar { display: grid; grid-template-columns: repeat(5, 1fr); height: 6px; border-radius: 999px; margin-top: 10px; margin-bottom: 20px; }
+    .brand-bar span:nth-child(1) { background: #00b140; }
+    .brand-bar span:nth-child(2) { background: #ff1b14; }
+    .brand-bar span:nth-child(3) { background: #ffd200; }
+    .brand-bar span:nth-child(4) { background: #1f4bff; }
+    .brand-bar span:nth-child(5) { background: #ff1b14; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# Lógica da Logo
+# Logo
 logo_b64 = ""
 if LOGO_PATH.exists():
-    logo_bytes = LOGO_PATH.read_bytes()
-    logo_b64 = base64.b64encode(logo_bytes).decode("ascii")
-
+    logo_b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode("ascii")
 logo_html = f'<div class="logo-wrap"><img src="data:image/png;base64,{logo_b64}" /></div>' if logo_b64 else ""
 
 st.markdown(f'<div class="header">{logo_html}<h1 class="header-title">Gerador de Planilha de Itens - FAF</h1></div>', unsafe_allow_html=True)
 st.markdown('<div class="brand-bar"><span></span><span></span><span></span><span></span><span></span></div>', unsafe_allow_html=True)
-st.markdown('<p class="app-subtitle">Faça upload do PDF e gere a planilha automaticamente.</p>', unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("PDF do Plano", type=["pdf"])
+uploaded_file = st.file_uploader("PDF do Plano de Aplicação", type=["pdf"])
 
 if "result" not in st.session_state:
     st.session_state.result = None
 
-if st.button("Processar", type="primary", disabled=uploaded_file is None):
+if st.button("Processar Arquivos", type="primary", disabled=uploaded_file is None):
     if not TEMPLATE_PATH.exists():
-        st.error(f"Arquivo 'Planilha Base.xlsx' não encontrado no repositório. Suba ele para o GitHub!")
+        st.error("Erro: 'Planilha Base.xlsx' não encontrada no GitHub.")
     else:
         try:
-            with st.status("Processando PDF...", expanded=True) as status:
-                status.write("Lendo PDF")
+            with st.status("Processando...", expanded=True) as status:
                 lines = extract_lines_from_pdf_file(uploaded_file)
-
-                status.write("Extraindo itens")
                 parsed_items = parse_items(lines)
                 
                 if not parsed_items:
-                    status.update(label="Nenhum item encontrado.", state="error")
-                    st.error("Nenhum item encontrado no PDF. Verifique o formato do arquivo.")
+                    st.error("Nenhum item identificado no PDF. Verifique se o PDF tem texto selecionável.")
                 else:
-                    status.write("Montando planilha")
                     _, header_map = get_template_header_info(TEMPLATE_PATH)
                     rows = build_rows(parsed_items, header_map)
                     excel_bytes = generate_excel_bytes(TEMPLATE_PATH, rows, header_map)
 
-                    # Lógica de resumo (conforme seu original)
                     st.session_state.result = {
-                        "rows": rows,
                         "excel_bytes": excel_bytes,
-                        "meta_counts": {}, # Adicione lógica de contagem aqui
-                        "missing_cells": [],
-                        "missing_items_count": 0,
+                        "count": len(parsed_items)
                     }
-                    status.update(label="Processamento concluído.", state="complete")
-        except Exception as exc:
-            st.exception(exc)
+                    status.update(label="Concluído!", state="complete")
+        except Exception as e:
+            st.error(f"Erro técnico: {e}")
 
-# Exibição do Resultado
 if st.session_state.result:
-    res = st.session_state.result
+    st.success(f"Sucesso! {st.session_state.result['count']} itens processados.")
     st.download_button(
-        "Baixar Planilha",
-        data=res["excel_bytes"],
-        file_name="Planilha de Itens.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        label="📥 Baixar Planilha Preenchida",
+        data=st.session_state.result["excel_bytes"],
+        file_name="Planilha_Portaria_Gerada.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
