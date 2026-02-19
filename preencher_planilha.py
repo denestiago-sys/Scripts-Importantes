@@ -6,24 +6,24 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 def extract_lines_from_pdf_file(file_searchable):
-    """Extrai todas as linhas do PDF removendo ruídos de cabeçalho."""
+    """Extrai linhas de forma limpa, tratando quebras de página do CE."""
     reader = PdfReader(file_searchable)
     all_lines = []
     for page in reader.pages:
         text = page.extract_text()
         if text:
-            # Remove linhas que são links ou números de página para não quebrar o texto
+            # Filtra rodapés e metadados que cortam a descrição
             lines = [l.strip() for l in text.splitlines() if "apps.mj.gov.br" not in l and "Página" not in l]
             all_lines.extend(lines)
     return [line for line in all_lines if line]
 
 def parse_items(lines):
-    """Extrai itens garantindo que citações (como Item 30) não criem novos itens."""
+    """Lógica avançada para detectar itens e ignorar citações como 'Item 30'."""
     items = []
     current_item = None
     current_field = None
     
-    # Rótulos para busca no PDF do Ceará
+    # Rótulos padrão do sistema do Ministério da Justiça
     labels = {
         "Bem/Serviço:": "Bem/Serviço",
         "Descrição:": "Descrição",
@@ -37,59 +37,80 @@ def parse_items(lines):
     }
 
     for line in lines:
-        # REGEX MILIMÉTRICO: Só aceita "Item X" se for a única coisa na linha ou estiver isolado.
-        # Isso ignora "REMANEJAMENTO DE SALDO DO ITEM 30"
-        item_match = re.match(r"^(?:Item|ITEM)\s+(\d+)$", line.strip())
+        clean_line = line.strip()
+        
+        # 1. DETECÇÃO DE NOVO ITEM (O SEGREDO ESTÁ AQUI)
+        # Procuramos por "Item X" onde X é um número. 
+        # Para evitar o erro do "Item 30", verificamos se a linha contém APENAS isso 
+        # ou se a palavra "Item" aparece logo após uma quebra de contexto.
+        is_new_item = False
+        item_match = re.search(r"^(?:Item|ITEM)\s+(\d+)$", clean_line)
         
         if item_match:
+            is_new_item = True
+        # Caso o PDF junte o Item com o Artigo na mesma linha (comum no CE)
+        elif clean_line.startswith("Item ") and "Art." in clean_line:
+            item_match = re.search(r"Item\s+(\d+)", clean_line)
+            is_new_item = True
+
+        if is_new_item and item_match:
             if current_item:
                 items.append(current_item)
             current_item = {"Número do Item": item_match.group(1)}
             current_field = None
+            
+            # Se a linha tinha mais coisa (ex: Artigo), tentamos processar o resto
+            remainder = clean_line.replace(item_match.group(0), "").strip()
+            if "Art." in remainder:
+                current_item["Artigo"] = remainder
             continue
 
         if current_item is None:
             continue
 
+        # 2. CAPTURA DE CAMPOS COM RÓTULO
         found_label = False
         for label, key in labels.items():
-            if label in line:
-                parts = line.split(label, 1)
+            if label in clean_line:
+                parts = clean_line.split(label, 1)
                 current_item[key] = parts[1].strip() if len(parts) > 1 else ""
                 current_field = key
                 found_label = True
                 break
         
-        # CONTINUAÇÃO DE TEXTO: Se não tem rótulo e não é um novo item, concatena ao campo anterior
+        # 3. ACÚMULO DE TEXTO (RESOLVE CAMPOS EM BRANCO E TEXTOS LONGOS)
         if not found_label and current_field:
-            # Se a linha não parece o início de outro metadado (não tem ':'), acumula tudo
-            if ":" not in line:
+            # Se a linha NÃO contém ':' (o que indica um novo campo)
+            # E não é uma citação de item que o regex acima já filtraria
+            if ":" not in clean_line:
                 prev_val = current_item.get(current_field, "")
-                current_item[current_field] = f"{prev_val} {line}".strip()
+                # Concatena sem limite de caracteres
+                current_item[current_field] = f"{prev_val} {clean_line}".strip()
 
     if current_item:
         items.append(current_item)
     return items
 
 def build_rows(parsed_items, header_map):
-    """Faz o De-Para entre os campos do PDF e as colunas da sua Planilha Base."""
+    """Mapeia os dados extraídos para as colunas da planilha."""
     rows = []
     mapping = {
-        "Número do Item": ["item"],
+        "Número do Item": ["item", "nº"],
         "Descrição": ["descrição"],
         "Bem/Serviço": ["bem", "serviço", "nome"],
         "Destinação": ["destinação", "unidade destinatária"],
         "Instituição": ["instituição", "órgão"],
         "Qtd. Planejada": ["qtd", "quantidade"],
-        "Valor Total": ["valor total"]
+        "Valor Total": ["valor total", "estimado"]
     }
 
     for item in parsed_items:
         row_data = {}
         for header in header_map.keys():
             val = ""
+            header_lower = header.lower()
             for internal_key, keywords in mapping.items():
-                if any(kw in header.lower() for kw in keywords):
+                if any(kw in header_lower for kw in keywords):
                     val = item.get(internal_key, "")
                     break
             row_data[header] = val
@@ -100,25 +121,24 @@ def generate_excel_bytes(template_path, rows, header_map, **kwargs):
     wb = load_workbook(template_path)
     ws = wb.active
     
-    # Começa na linha 3 (abaixo do cabeçalho da linha 2)
+    # Preenchimento a partir da linha 3
     start_row = 3
-    
     for r_idx, row_data in enumerate(rows, start=start_row):
         for header, col_idx in header_map.items():
             cell = ws.cell(row=r_idx, column=col_idx)
             cell.value = row_data.get(header)
-            # Permite que o Excel quebre o texto para exibir descrições longas
-            cell.alignment = cell.alignment.copy(wrapText=True)
+            cell.alignment = cell.alignment.copy(wrapText=True) # Ativa quebra de texto
 
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
 
-# --- STUBS PARA COMPATIBILIDADE COM SEU APP.PY ---
+# --- FUNÇÕES DE COMPATIBILIDADE (STUBS) ---
 def get_template_header_info(path):
     wb = load_workbook(path, data_only=True)
     ws = wb.active
     header_map = {}
+    # Lê a linha 2 da Planilha Base para saber as colunas
     for col in range(1, ws.max_column + 1):
         val = ws.cell(row=2, column=col).value
         if val: header_map[str(val)] = col
