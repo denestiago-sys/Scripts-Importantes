@@ -7,46 +7,39 @@ from preencher_planilha import (
     generate_excel_bytes
 )
 
-# Configuração da Página
 st.set_page_config(page_title="Processador de Planos", layout="wide")
 
 st.title("📄 Extrator de Itens - Plano de Aplicação")
-st.info("Este script remove duplicatas (ex: Item 30) e preenche a planilha modelo automaticamente.")
 
-# O modelo de planilha deve estar na mesma pasta
-TEMPLATE_FILE = "Planilha_Base.xlsx" 
+# CONFIGURAÇÃO DO NOME DO ARQUIVO
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATE_NAME = "Planilha Base.xlsx" # Nome atualizado com espaço
+TEMPLATE_PATH = BASE_DIR / TEMPLATE_NAME
 
 uploaded_pdf = st.file_uploader("Selecione o PDF do Plano", type=["pdf"])
 
 if uploaded_pdf and st.button("Processar e Gerar Excel"):
-    try:
-        with st.spinner("Lendo PDF e extraindo dados..."):
-            # 1. Extração
-            lines = extract_lines_from_pdf(uploaded_pdf)
-            
-            # 2. Parsing (Com trava de duplicatas)
-            items = parse_items(lines)
-            
-            if not items:
-                st.warning("Nenhum item encontrado no PDF. Verifique o formato.")
-            else:
-                # 3. Formatação
-                rows = build_rows(items)
+    if not TEMPLATE_PATH.exists():
+        st.error(f"Erro: O arquivo '{TEMPLATE_NAME}' não foi encontrado na pasta.")
+        st.info(f"Caminho esperado: {TEMPLATE_PATH}")
+    else:
+        try:
+            with st.spinner("Processando (Removendo duplicados e preenchendo)..."):
+                lines = extract_lines_from_pdf(uploaded_pdf)
+                items = parse_items(lines)
                 
-                # 4. Excel
-                if Path(TEMPLATE_FILE).exists():
-                    excel_data = generate_excel_bytes(TEMPLATE_FILE, rows)
+                if not items:
+                    st.warning("Nenhum item detetado no PDF.")
+                else:
+                    rows = build_rows(items)
+                    excel_data = generate_excel_bytes(TEMPLATE_PATH, rows)
                     
-                    st.success(f"Processado com sucesso! {len(items)} itens encontrados.")
-                    
+                    st.success(f"Sucesso! {len(items)} itens extraídos sem duplicatas.")
                     st.download_button(
                         label="📥 Baixar Planilha Preenchida",
                         data=excel_data,
-                        file_name="Planilha_Preenchida_Final.xlsx",
+                        file_name="Planilha_Finalizada.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                else:
-                    st.error(f"Erro: Arquivo '{TEMPLATE_FILE}' não encontrado na pasta.")
-                    
-    except Exception as e:
-        st.error(f"Ocorreu um erro: {e}")
+        except Exception as e:
+            st.error(f"Erro ao processar: {e}")
