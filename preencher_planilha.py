@@ -40,7 +40,7 @@ def parse_items(lines):
     items = []
     current_meta = "N/A"
     current_item_obj = None
-    seen_items = set() # EVITA REPETIÇÃO DO ITEM 30
+    seen_items = set() 
 
     for line in lines:
         m_meta = META_RE.match(line)
@@ -55,8 +55,8 @@ def parse_items(lines):
             
             if unique_key not in seen_items:
                 current_item_obj = {
-                    "meta": current_meta,
-                    "item": item_num,
+                    "meta_num": current_meta,
+                    "item_num": item_num,
                     "status": m_item.group(2) or "Planejado",
                     "lines": []
                 }
@@ -70,13 +70,13 @@ def parse_items(lines):
 
 def extract_fields(item_lines):
     fields = {key: [] for key, _ in CAPTURE_PATTERNS}
-    fields.update({"art_completo": ""})
+    fields.update({"art_texto": ""})
     current_f = None
     
     for line in item_lines:
         m_art = ART_PATTERN.match(line)
         if m_art:
-            fields["art_completo"] = line
+            fields["art_texto"] = line # Guarda o texto longo do Artigo
             continue
 
         matched = False
@@ -98,8 +98,9 @@ def build_rows(parsed_items):
     for item in parsed_items:
         f = extract_fields(item["lines"])
         rows.append({
-            "Número da Meta Específica": f["art_completo"] if f["art_completo"] else f"Meta {item['meta']}",
-            "Número do Item": item["item"],
+            "Número da Meta Específica": item["meta_num"], # APENAS O NÚMERO
+            "Número do Item": item["item_num"],
+            "Ação conforme Art. 7º da portaria nº 685": f["art_texto"], # TEXTO LONGO DO ARTIGO
             "Material/Serviço": f["bem"],
             "Descrição": f["descricao"],
             "Destinação": f["destinacao"],
@@ -117,19 +118,22 @@ def generate_excel_bytes(template_path, rows):
     ws = wb.active
     
     header_row = 1
+    # Procura a linha que contém os títulos das colunas
     for r in range(1, 10):
         val = str(ws.cell(r, 1).value or "")
         if "Meta" in val or "Número" in val:
             header_row = r
             break
 
+    # Mapeia os nomes das colunas para os índices (1, 2, 3...)
     col_map = {str(ws.cell(header_row, c).value).strip(): c 
                for c in range(1, ws.max_column + 1) if ws.cell(header_row, c).value}
 
     for idx, data in enumerate(rows, start=header_row + 1):
-        for header, col_idx in col_map.items():
-            if header in data:
-                ws.cell(row=idx, column=col_idx, value=data[header])
+        for header_name, col_idx in col_map.items():
+            # Tenta encontrar a chave correspondente no dicionário de dados
+            if header_name in data:
+                ws.cell(row=idx, column=col_idx, value=data[header_name])
 
     buffer = BytesIO()
     wb.save(buffer)
