@@ -5,7 +5,7 @@ import io
 from io import BytesIO
 from pathlib import Path
 
-# --- CONFIGURAÇÕES DE REGEX (Padrões do PDF) ---
+# --- PADRÕES DE BUSCA (REGEX) ---
 META_RE = re.compile(r"^META ESPEC[ÍI]FICA\s+(\d+)", re.IGNORECASE)
 ITEM_RE = re.compile(r"^Item\s*(\d+)\s*(Planejado|Aprovado|Cancelado)?", re.IGNORECASE)
 ART_PATTERN = re.compile(r"^Art\.?\s*(6|7|8)\s*º?\s*(?:\((\d+)\))?\s*:\s*(.*)", re.IGNORECASE)
@@ -30,18 +30,17 @@ def extract_lines_from_pdf(file_obj):
     with pdfplumber.open(file_obj) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
-            # Normalização básica para evitar quebras de linha estranhas
             text = text.replace("\x0c", "\n")
             for raw in text.splitlines():
-                if raw.strip() and "apps.mj.gov.br" not in raw:
+                if raw.strip():
                     lines.append(raw.strip())
     return lines
 
 def parse_items(lines):
     items = []
     current_meta = "N/A"
-    current_item = None
-    seen_items = set() # TRAVA PARA NÃO REPETIR ITEM 30
+    current_item_obj = None
+    seen_items = set() # EVITA REPETIÇÃO DO ITEM 30
 
     for line in lines:
         m_meta = META_RE.match(line)
@@ -51,40 +50,36 @@ def parse_items(lines):
         
         m_item = ITEM_RE.match(line)
         if m_item:
-            item_id = m_item.group(1)
-            status = m_item.group(2) or "Aprovado"
+            item_num = m_item.group(1)
+            unique_key = f"M{current_meta}I{item_num}" 
             
-            # Chave única para evitar duplicação por quebra de página
-            unique_key = f"M{current_meta}I{item_id}"
             if unique_key not in seen_items:
-                current_item = {
+                current_item_obj = {
                     "meta": current_meta,
-                    "item": item_id,
-                    "status": status,
+                    "item": item_num,
+                    "status": m_item.group(2) or "Planejado",
                     "lines": []
                 }
-                items.append(current_item)
+                items.append(current_item_obj)
                 seen_items.add(unique_key)
             continue
         
-        if current_item:
-            current_item["lines"].append(line)
+        if current_item_obj:
+            current_item_obj["lines"].append(line)
     return items
 
 def extract_fields(item_lines):
     fields = {key: [] for key, _ in CAPTURE_PATTERNS}
-    fields.update({"art_completo": "", "art_num": ""})
+    fields.update({"art_completo": ""})
     current_f = None
     
     for line in item_lines:
-        matched = False
-        # Captura o Artigo (Ação)
         m_art = ART_PATTERN.match(line)
         if m_art:
-            fields["art_num"] = m_art.group(1)
             fields["art_completo"] = line
             continue
 
+        matched = False
         for key, pat in CAPTURE_PATTERNS:
             m = pat.match(line)
             if m:
@@ -121,18 +116,16 @@ def generate_excel_bytes(template_path, rows):
     wb = openpyxl.load_workbook(template_path)
     ws = wb.active
     
-    # Localiza o cabeçalho "Número da Meta" ou assume linha 2
     header_row = 1
-    for r in range(1, 5):
-        if "Número" in str(ws.cell(r, 1).value or ""):
+    for r in range(1, 10):
+        val = str(ws.cell(r, 1).value or "")
+        if "Meta" in val or "Número" in val:
             header_row = r
             break
 
-    # Mapeia colunas existentes no Excel
     col_map = {str(ws.cell(header_row, c).value).strip(): c 
                for c in range(1, ws.max_column + 1) if ws.cell(header_row, c).value}
 
-    # Preenche os dados
     for idx, data in enumerate(rows, start=header_row + 1):
         for header, col_idx in col_map.items():
             if header in data:
