@@ -11,34 +11,33 @@ st.set_page_config(page_title="Processador de Planos", layout="wide")
 
 st.title("📄 Extrator de Itens - Plano de Aplicação")
 
-# CONFIGURAÇÃO DO NOME DO ARQUIVO
 BASE_DIR = Path(__file__).resolve().parent
-TEMPLATE_NAME = "Planilha Base.xlsx" # Nome atualizado com espaço
+TEMPLATE_NAME = "Planilha Base.xlsx"
 TEMPLATE_PATH = BASE_DIR / TEMPLATE_NAME
 
 uploaded_pdf = st.file_uploader("Selecione o PDF do Plano", type=["pdf"])
 
 if uploaded_pdf and st.button("Processar e Gerar Excel"):
     if not TEMPLATE_PATH.exists():
-        st.error(f"Erro: O arquivo '{TEMPLATE_NAME}' não foi encontrado na pasta.")
-        st.info(f"Caminho esperado: {TEMPLATE_PATH}")
+        st.error(f"Erro: O arquivo '{TEMPLATE_NAME}' não foi encontrado.")
+        st.info(f"Certifique-se de que o arquivo está na pasta: {BASE_DIR}")
     else:
         try:
-            with st.spinner("Processando (Removendo duplicados e preenchendo)..."):
+            with st.spinner("Organizando colunas e removendo duplicatas..."):
                 lines = extract_lines_from_pdf(uploaded_pdf)
                 items = parse_items(lines)
                 
                 if not items:
-                    st.warning("Nenhum item detetado no PDF.")
+                    st.warning("Nenhum item detectado no PDF.")
                 else:
                     rows = build_rows(items)
                     excel_data = generate_excel_bytes(TEMPLATE_PATH, rows)
                     
-                    st.success(f"Sucesso! {len(items)} itens extraídos sem duplicatas.")
+                    st.success(f"Sucesso! {len(items)} itens extraídos corretamente.")
                     st.download_button(
-                        label="📥 Baixar Planilha Preenchida",
+                        label="📥 Baixar Planilha Corrigida",
                         data=excel_data,
-                        file_name="Planilha_Finalizada.xlsx",
+                        file_name="Planilha_Final_Corrigida.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
         except Exception as e:
