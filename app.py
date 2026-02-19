@@ -1,46 +1,91 @@
-import streamlit as st
-from pathlib import Path
-from preencher_planilha import (
-    extract_lines_from_pdf_file,
-    parse_items,
-    build_rows,
-    generate_excel_bytes,
-    get_template_header_info
-)
+def parse_items(lines):
+    items = []
+    current_meta = None
+    current_item = None
+    current_status = None
+    current_lines = []
+    seen_items = set() # Trava para evitar repetição (como o item 30)
 
-TEMPLATE_NAME = "Planilha Base.xlsx"
-TEMPLATE_PATH = Path(__file__).parent / TEMPLATE_NAME
+    def flush():
+        nonlocal current_item, current_lines, current_status, current_meta
+        if current_meta is None or current_item is None:
+            return
+        
+        # Cria uma chave única para Meta + Item
+        item_key = f"{current_meta}-{current_item}"
+        if item_key not in seen_items:
+            items.append({
+                "meta": current_meta,
+                "item": current_item,
+                "status": current_status or "Planejado",
+                "lines": current_lines[:],
+            })
+            seen_items.add(item_key)
+        
+        current_lines = []
 
-st.set_page_config(page_title="FAF - Processador", layout="wide")
-st.title("📄 Extração de Dados FAF (Padrão Completo)")
-
-uploaded_file = st.file_uploader("Upload do PDF do Plano de Aplicação", type=["pdf"])
-
-if st.button("Gerar Planilha Completa", type="primary") and uploaded_file:
-    try:
-        with st.status("Processando documento...", expanded=True) as status:
-            status.write("Lendo PDF e aplicando Regex...")
-            lines = extract_lines_from_pdf_file(uploaded_file)
+    for line in lines:
+        meta_match = META_RE.match(line)
+        if meta_match:
+            flush()
+            current_meta = int(meta_match.group(1))
+            continue
             
-            status.write("Agrupando Itens e Metas...")
-            items = parse_items(lines)
+        item_match = ITEM_RE.match(line)
+        if item_match:
+            flush()
+            current_item = int(item_match.group(1))
+            current_status = (item_match.group(2) or "Planejado").capitalize()
+            continue
             
-            if not items:
-                st.error("Nenhum item detectado. Verifique o formato do PDF.")
-            else:
-                status.write(f"Mapeando {len(items)} itens para o Excel...")
-                header_row, header_map = get_template_header_info(TEMPLATE_PATH)
-                rows = build_rows(items, header_map)
-                
-                excel_data = generate_excel_bytes(TEMPLATE_PATH, rows, header_map)
-                
-                status.update(label="Processamento concluído!", state="complete")
-                st.success(f"Sucesso: {len(items)} itens extraídos.")
-                st.download_button(
-                    label="📥 Baixar Planilha Preenchida",
-                    data=excel_data,
-                    file_name="FAF_Preenchido.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-    except Exception as e:
-        st.error(f"Erro crítico: {str(e)}")
+        if current_item is not None:
+            # Evita adicionar linhas de cabeçalho de página repetitivas
+            if "Planos de Aplicação" in line or "CÓDIGO DE VERIFICAÇÃO" in line:
+                continue
+            current_lines.append(line)
+
+    flush()
+    return items
+
+def extract_fields(item_lines):
+    fields = {key: [] for key, _ in CAPTURE_PATTERNS}
+    fields["acao"] = []
+    fields["art"] = []
+    fields["art_num"] = ""
+    current_field = None
+
+    for line in item_lines:
+        # Tenta capturar o Artigo/Ação primeiro (é o que define a Meta na planilha)
+        art_match = ART_PATTERN.match(line)
+        if art_match:
+            fields["art_num"] = art_match.group(1)
+            fields["art"] = [art_match.group(3).strip()]
+            current_field = "art"
+            continue
+
+        # Verifica se a linha pertence a um campo conhecido (Bem, Descrição, etc)
+        matched_label = False
+        for field, pattern in CAPTURE_PATTERNS:
+            match = pattern.match(line)
+            if match:
+                content = match.group(1).strip()
+                fields[field] = [content] if content else []
+                current_field = field
+                matched_label = True
+                break
+        
+        if matched_label:
+            continue
+
+        # Se não houver novo rótulo, anexa a linha ao campo atual (acumula descrição longa)
+        if current_field and line.strip():
+            # Impede que metadados de sistema entrem nos campos
+            if not any(stop.match(line) for stop in STOP_PATTERNS):
+                fields[current_field].append(line.strip())
+
+    # Consolida as listas em strings
+    for key in fields:
+        if isinstance(fields[key], list):
+            fields[key] = " ".join(fields[key]).strip()
+    
+    return fields
