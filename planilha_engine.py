@@ -117,8 +117,12 @@ def normalize_pdf_text(text: str) -> str:
     text = re.sub(
         r"(META ESPEC[ÍI]FICA\s+\d+)", r"\n\1\n", text, flags=re.IGNORECASE
     )
+    # Requer a palavra de status (Planejado/Aprovado/Cancelado) para reconhecer
+    # um cabeçalho de item. Sem o status, textos como "REMANEJAMENTO DE SALDO
+    # DO ITEM 30" que aparecem em descrições seriam incorretamente tratados como
+    # início de um novo item.
     text = re.sub(
-        r"(Item\s*\d+\s*(?:Planejado|Aprovado|Cancelado)?)",
+        r"(Item\s*\d+\s+(?:Planejado|Aprovado|Cancelado))",
         r"\n\1\n",
         text,
         flags=re.IGNORECASE,
@@ -218,6 +222,20 @@ def get_header_info_from_ws(ws, header_row: int):
     return headers, header_map
 
 
+# Campos financeiros que só aparecem APÓS a descrição do item no PDF.
+# Usados para distinguir um cabeçalho de item real de uma referência
+# a um item dentro de uma descrição (ex.: "REMANEJAMENTO DE SALDO DO ITEM 30").
+_FINANCIAL_FIELD_RE = re.compile(
+    r"^(Destina[cç][aã]o|Institui[cç][aã]o|Natureza|Valor\s+Total|Qtd\.?|Quantidade)",
+    re.IGNORECASE,
+)
+
+
+def _item_has_financial_data(lines) -> bool:
+    """Retorna True se alguma linha já coletada é um campo financeiro do item."""
+    return any(_FINANCIAL_FIELD_RE.match(l) for l in lines)
+
+
 def parse_items(lines):
     items = []
     current_meta = None
@@ -247,10 +265,26 @@ def parse_items(lines):
             continue
         item_match = ITEM_RE.match(line)
         if item_match:
+            new_item   = int(item_match.group(1))
+            new_status = (item_match.group(2) or "").capitalize()
+
+            # Guarda de segurança: "Item N" sem palavra de status que aparece
+            # ANTES de qualquer campo financeiro (Destinação, Instituição, etc.)
+            # ser coletado é quase certamente uma referência dentro de uma
+            # descrição (ex.: "REMANEJAMENTO DE SALDO DO ITEM 30"), não um
+            # cabeçalho de item real. Nesse caso, tratamos como texto comum.
+            if (
+                not new_status
+                and current_item is not None
+                and not _item_has_financial_data(current_lines)
+            ):
+                current_lines.append(line)
+                continue
+
             flush()
-            current_item = int(item_match.group(1))
-            current_status = (item_match.group(2) or "").capitalize()
-            current_lines = []
+            current_item   = new_item
+            current_status = new_status
+            current_lines  = []
             continue
         if current_item is not None:
             current_lines.append(line)
