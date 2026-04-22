@@ -20,6 +20,10 @@ ACTION_HEADER_PATTERN = re.compile(
     r"^Ação conforme Art\.\s*\d+º\s+da portaria nº 685$",
     re.IGNORECASE,
 )
+# Texto de exemplo que o portal insere no campo "Indicador Geral de Resultado"
+# (começa com "EX:" e termina com ")"). Deve ser removido do resultado extraído.
+EXAMPLE_BLOCK_RE = re.compile(r"EX:\s*\(.*?\)", re.DOTALL | re.IGNORECASE)
+
 PLAN_SIGNATURE_RE = re.compile(
     r"\b([A-Z]{2})\s*-\s*([A-Z0-9]+)\s*-\s*(20\d{2})\b"
 )
@@ -384,7 +388,7 @@ def extract_indicador_geral_completo(lines) -> str:
             if re.match(r"^(Itens da Meta|Status:)", next_line, re.IGNORECASE):
                 break
             collected.append(next_line)
-        indicador = blank_if_dash_only(" ".join(collected))
+        indicador = blank_if_dash_only(EXAMPLE_BLOCK_RE.sub("", " ".join(collected)).strip())
         if indicador:
             return indicador
     return ""
