@@ -306,6 +306,38 @@ INDICADOR_GERAL_MARKER_RE = re.compile(
 )
 VALOR_REFERENCIA_RE = re.compile(r"valor de refer[eê]ncia\s*:", re.IGNORECASE)
 META_ESPECIFICA_LINE_RE = re.compile(r"^(?:A[ÇC][ÃA]O\s*/\s*)?META ESPEC[ÍI]FICA\s+(\d+)", re.IGNORECASE)
+# Versão que exige que a linha contenha SOMENTE "(AÇÃO /) META ESPECÍFICA N",
+# usada para identificar cabeçalhos reais de seção (ver _is_real_meta_especifica_header).
+META_ESPECIFICA_FULL_LINE_RE = re.compile(
+    r"^(?:A[ÇC][ÃA]O\s*/\s*)?META ESPEC[ÍI]FICA\s+(\d+)$", re.IGNORECASE
+)
+
+
+def _is_real_meta_especifica_header(lines, idx):
+    """Distingue um cabeçalho real de seção ("(AÇÃO /) META ESPECÍFICA N") de
+    falsas ocorrências do mesmo texto dentro de descrições de itens (ex.:
+    "Descrição: Meta específica 1: Adquirir...") ou de texto corrido
+    (ex.: "...serão implementadas 3 metas específicas. A meta específica 1
+    tem como objetivo...").
+
+    Critérios:
+    - A linha precisa corresponder EXATAMENTE ao padrão "(AÇÃO /) META
+      ESPECÍFICA N" (sem texto adicional na mesma linha).
+    - A linha seguinte não pode começar com ":" (caso contrário é uma
+      descrição do tipo "Meta específica 1: <texto>" quebrada em duas linhas).
+    - A linha não pode estar totalmente em minúsculas (descarta ocorrências
+      embutidas em frases de texto corrido, ex.: "meta específica 1").
+    """
+    line = lines[idx]
+    match = META_ESPECIFICA_FULL_LINE_RE.match(line)
+    if not match:
+        return None
+    next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
+    if (next_line or "").strip().startswith(":"):
+        return None
+    if line == line.lower():
+        return None
+    return match
 
 SECTION_LABEL_PATTERNS = [
     ("descricao_indicador", re.compile(r"^Descri[cç][aã]o do Indicador:\s*(.*)", re.IGNORECASE)),
@@ -373,6 +405,8 @@ def extract_indicador_geral_completo(lines) -> str:
             collected.append(inline)
         for next_line in lines[idx + 1:]:
             if re.match(r"^META ESPEC[ÍI]FICA", next_line, re.IGNORECASE):
+                break
+            if re.match(r"^A[ÇC][ÃA]O\s*/\s*$", next_line, re.IGNORECASE):
                 break
             if re.match(r"^Meta Geral", next_line, re.IGNORECASE):
                 inline_meta = _extract_text_after_marker(next_line, INDICADOR_GERAL_MARKER_RE)
@@ -472,8 +506,8 @@ def extract_meta_especifica_sections(lines):
     current = None
     current_field = None
 
-    for line in lines:
-        meta_match = META_ESPECIFICA_LINE_RE.match(line)
+    for idx, line in enumerate(lines):
+        meta_match = _is_real_meta_especifica_header(lines, idx)
         if meta_match:
             if current is not None:
                 sections.append(current)
@@ -544,6 +578,7 @@ def extract_meta_especifica_sections(lines):
     technical_sections = _dedupe_sections_keep_last(technical_sections)
 
     merged_sections = _merge_sections_prefer_technical(finalized_sections, technical_sections)
+    merged_sections = sorted(merged_sections, key=lambda s: s.get("numero_meta", 0))
 
     for section in merged_sections:
         section["meta_pesp"] = _trim_meta_pesp(section.get("meta_pesp", ""))
