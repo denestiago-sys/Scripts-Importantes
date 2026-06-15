@@ -9,7 +9,7 @@ import pdfplumber
 import openpyxl
 from openpyxl.cell.cell import MergedCell
 
-META_RE = re.compile(r"^META ESPEC[ÍI]FICA\s+(\d+)", re.IGNORECASE)
+META_ESPECIFICA_LINE_RE = re.compile(r"^(?:A[ÇC][ÃA]O\s*/\s*)?META ESPEC[ÍI]FICA\s+(\d+)", re.IGNORECASE)
 ITEM_RE = re.compile(
     r"^Item\s*(\d+)\s*(Planejado|Aprovado|Cancelado)?", re.IGNORECASE
 )
