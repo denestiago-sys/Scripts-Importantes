@@ -261,8 +261,8 @@ def parse_items(lines):
         current_status = None
         current_lines = []
 
-    for line in lines:
-        meta_match = META_RE.match(line)
+    for idx, line in enumerate(lines):
+        meta_match = _is_real_meta_especifica_header(lines, idx)
         if meta_match:
             flush()
             current_meta = int(meta_match.group(1))
