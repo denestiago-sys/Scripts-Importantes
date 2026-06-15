@@ -305,7 +305,7 @@ INDICADOR_GERAL_MARKER_RE = re.compile(
     r"Indicador Geral(?:\s+de(?:\s+Resultado)?)?\s*:?", re.IGNORECASE,
 )
 VALOR_REFERENCIA_RE = re.compile(r"valor de refer[eê]ncia\s*:", re.IGNORECASE)
-META_ESPECIFICA_LINE_RE = re.compile(r"^META ESPEC[ÍI]FICA\s+(\d+)", re.IGNORECASE)
+META_ESPECIFICA_LINE_RE = re.compile(r"^(?:A[ÇC][ÃA]O\s*/\s*)?META ESPEC[ÍI]FICA\s+(\d+)", re.IGNORECASE)
 
 SECTION_LABEL_PATTERNS = [
     ("descricao_indicador", re.compile(r"^Descri[cç][aã]o do Indicador:\s*(.*)", re.IGNORECASE)),
