@@ -9,26 +9,20 @@ import pdfplumber
 import openpyxl
 from openpyxl.cell.cell import MergedCell
 
-META_RE = re.compile(r"^(?:A[ÇC][ÃA]O\s*/\s*)?META ESPEC[ÍI]FICA\s+(\d+)", re.IGNORECASE)
+META_HEADER_PATTERN = r"(?:A[ÇC][ÃA]O\s*/\s*)?META ESPEC[ÍI]FICA"
+META_RE = re.compile(rf"^{META_HEADER_PATTERN}\s+(\d+)", re.IGNORECASE)
 ITEM_RE = re.compile(
     r"^Item\s*(\d+)\s*(Planejado|Aprovado|Cancelado)?", re.IGNORECASE
 )
 ACTION_HEADER_KEY = "acao_art"
 ACTION_HEADER_NUM_KEY = "acao_art_num"
 REQUIRED_TEMPLATE_NAME = "Planilha Base(atualizada).xlsx"
-ACTION_HEADER_PATTERN = re.compile(
-    r"^Ação conforme Art\.\s*\d+º\s+da portaria nº 685$",
-    re.IGNORECASE,
-)
-# Texto de exemplo que o portal insere no campo "Indicador Geral de Resultado"
-# (começa com "EX:" e termina com ")"). Deve ser removido do resultado extraído.
-EXAMPLE_BLOCK_RE = re.compile(r"EX:\s*\(.*?\)", re.DOTALL | re.IGNORECASE)
-
+ACTION_HEADER_PATTERN = re.compile(r"^Ação conforme Art\.", re.IGNORECASE)
 PLAN_SIGNATURE_RE = re.compile(
     r"\b([A-Z]{2})\s*-\s*([A-Z0-9]+)\s*-\s*(20\d{2})\b"
 )
 ART_PATTERN = re.compile(
-    r"^Art\.?\s*(6|7|8)\s*º?\s*(?:\((\d+)\))?\s*:\s*(.*)",
+    r"^Art\.?\s*(\d+)\s*º?\s*(?:\((\d+)\))?\s*:\s*(.*)",
     re.IGNORECASE,
 )
 ACTION_PATTERN = re.compile(r"^A[cç][aã]o:\s*(.*)", re.IGNORECASE)
@@ -71,7 +65,7 @@ ANALYSIS_TEMPLATE_TITLE = "ANÁLISE DOS ELEMENTOS DO PLANO DE APLICAÇÃO"
 ANALYSIS_BLOCK_START_ROW = 14
 ANALYSIS_BLOCK_HEIGHT = 11
 ANALYSIS_BLOCK_START_COL = 1  # A
-ANALYSIS_BLOCK_END_COL = 12   # L
+ANALYSIS_BLOCK_END_COL = 12  # L
 
 
 def normalize(text: str) -> str:
@@ -119,14 +113,10 @@ def parse_int(value: str):
 def normalize_pdf_text(text: str) -> str:
     text = text.replace("\x0c", "\n")
     text = re.sub(
-        r"(META ESPEC[ÍI]FICA\s+\d+)", r"\n\1\n", text, flags=re.IGNORECASE
+        rf"({META_HEADER_PATTERN}\s+\d+)", r"\n\1\n", text, flags=re.IGNORECASE
     )
-    # Requer a palavra de status (Planejado/Aprovado/Cancelado) para reconhecer
-    # um cabeçalho de item. Sem o status, textos como "REMANEJAMENTO DE SALDO
-    # DO ITEM 30" que aparecem em descrições seriam incorretamente tratados como
-    # início de um novo item.
     text = re.sub(
-        r"(Item\s*\d+\s+(?:Planejado|Aprovado|Cancelado))",
+        r"(Item\s*\d+\s*(?:Planejado|Aprovado|Cancelado)?)",
         r"\n\1\n",
         text,
         flags=re.IGNORECASE,
@@ -188,6 +178,8 @@ def extract_plan_signature(lines):
 def resolve_art_by_plan_rule(sigla, ano):
     if not sigla or not ano:
         return None
+    if int(ano) in {2019, 2020, 2021, 2022, 2025, 2026}:
+        return None
     sigla = str(sigla).upper()
     if sigla in {"ECV", "FISPDS", "RMVI"} and 2019 <= ano <= 2025:
         return "6"
@@ -196,6 +188,28 @@ def resolve_art_by_plan_rule(sigla, ano):
     if sigla in {"VPSP", "MQVPSP"} and 2019 <= ano <= 2025:
         return "8"
     return None
+
+
+def resolve_action_header_title_by_plan(sigla, ano):
+    if not sigla or not ano:
+        return None
+    if int(ano) not in {2023, 2024}:
+        return None
+    sigla = str(sigla).upper()
+    transition_map = {
+        "RMV": ("5", "6"),
+        "RMVI": ("5", "6"),
+        "EVM": ("6", "7"),
+        "MQVPSP": ("7", "8"),
+    }
+    pair = transition_map.get(sigla)
+    if not pair:
+        return None
+    art_439, art_685 = pair
+    return (
+        f"Ação conforme Art. {art_439}º da portaria nº 439 "
+        f"e Art. {art_685}º da portaria nº 685"
+    )
 
 
 def is_analysis_template_sheet(ws) -> bool:
@@ -213,6 +227,12 @@ def _header_key(header: str) -> str:
     return ACTION_HEADER_KEY if ACTION_HEADER_PATTERN.match(header) else header
 
 
+def get_template_header_info_by_row(template_path: Path, header_row: int):
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb.active
+    return get_header_info_from_ws(ws, header_row)
+
+
 def get_header_info_from_ws(ws, header_row: int):
     headers = []
     header_map = {}
@@ -224,20 +244,6 @@ def get_header_info_from_ws(ws, header_row: int):
             if key not in header_map:
                 header_map[key] = cell.column
     return headers, header_map
-
-
-# Campos financeiros que só aparecem APÓS a descrição do item no PDF.
-# Usados para distinguir um cabeçalho de item real de uma referência
-# a um item dentro de uma descrição (ex.: "REMANEJAMENTO DE SALDO DO ITEM 30").
-_FINANCIAL_FIELD_RE = re.compile(
-    r"^(Destina[cç][aã]o|Institui[cç][aã]o|Natureza|Valor\s+Total|Qtd\.?|Quantidade)",
-    re.IGNORECASE,
-)
-
-
-def _item_has_financial_data(lines) -> bool:
-    """Retorna True se alguma linha já coletada é um campo financeiro do item."""
-    return any(_FINANCIAL_FIELD_RE.match(l) for l in lines)
 
 
 def parse_items(lines):
@@ -261,34 +267,18 @@ def parse_items(lines):
         current_status = None
         current_lines = []
 
-    for idx, line in enumerate(lines):
-        meta_match = _is_real_meta_especifica_header(lines, idx)
+    for line in lines:
+        meta_match = META_RE.match(line)
         if meta_match:
             flush()
             current_meta = int(meta_match.group(1))
             continue
         item_match = ITEM_RE.match(line)
         if item_match:
-            new_item   = int(item_match.group(1))
-            new_status = (item_match.group(2) or "").capitalize()
-
-            # Guarda de segurança: "Item N" sem palavra de status que aparece
-            # ANTES de qualquer campo financeiro (Destinação, Instituição, etc.)
-            # ser coletado é quase certamente uma referência dentro de uma
-            # descrição (ex.: "REMANEJAMENTO DE SALDO DO ITEM 30"), não um
-            # cabeçalho de item real. Nesse caso, tratamos como texto comum.
-            if (
-                not new_status
-                and current_item is not None
-                and not _item_has_financial_data(current_lines)
-            ):
-                current_lines.append(line)
-                continue
-
             flush()
-            current_item   = new_item
-            current_status = new_status
-            current_lines  = []
+            current_item = int(item_match.group(1))
+            current_status = (item_match.group(2) or "").capitalize()
+            current_lines = []
             continue
         if current_item is not None:
             current_lines.append(line)
@@ -299,66 +289,42 @@ def parse_items(lines):
 
 META_GERAL_LINE_RE = re.compile(r"^Meta Geral$", re.IGNORECASE)
 INDICADOR_GERAL_LINE_RE = re.compile(
-    r"^Indicador Geral de Resultado\b", re.IGNORECASE,
+    r"^Indicador Geral de Resultado\b",
+    re.IGNORECASE,
 )
 INDICADOR_GERAL_MARKER_RE = re.compile(
-    r"Indicador Geral(?:\s+de(?:\s+Resultado)?)?\s*:?", re.IGNORECASE,
+    r"Indicador Geral(?:\s+de(?:\s+Resultado)?)?\s*:?",
+    re.IGNORECASE,
 )
 VALOR_REFERENCIA_RE = re.compile(r"valor de refer[eê]ncia\s*:", re.IGNORECASE)
-META_ESPECIFICA_LINE_RE = re.compile(r"^(?:A[ÇC][ÃA]O\s*/\s*)?META ESPEC[ÍI]FICA\s+(\d+)", re.IGNORECASE)
-# Versão que exige que a linha contenha SOMENTE "(AÇÃO /) META ESPECÍFICA N",
-# usada para identificar cabeçalhos reais de seção (ver _is_real_meta_especifica_header).
-META_ESPECIFICA_FULL_LINE_RE = re.compile(
-    r"^(?:A[ÇC][ÃA]O\s*/\s*)?META ESPEC[ÍI]FICA\s+(\d+)$", re.IGNORECASE
+META_ESPECIFICA_LINE_RE = re.compile(
+    rf"^{META_HEADER_PATTERN}\s+(\d+)", re.IGNORECASE
 )
-
-
-def _is_real_meta_especifica_header(lines, idx):
-    """Distingue um cabeçalho real de seção ("(AÇÃO /) META ESPECÍFICA N") de
-    falsas ocorrências do mesmo texto dentro de descrições de itens (ex.:
-    "Descrição: Meta específica 1: Adquirir...") ou de texto corrido
-    (ex.: "...serão implementadas 3 metas específicas. A meta específica 1
-    tem como objetivo...").
-
-    Critérios:
-    - A linha precisa corresponder EXATAMENTE ao padrão "(AÇÃO /) META
-      ESPECÍFICA N" (sem texto adicional na mesma linha).
-    - A linha seguinte não pode começar com ":" (caso contrário é uma
-      descrição do tipo "Meta específica 1: <texto>" quebrada em duas linhas).
-    - A linha não pode estar totalmente em minúsculas (descarta ocorrências
-      embutidas em frases de texto corrido, ex.: "meta específica 1").
-    """
-    line = lines[idx]
-    match = META_ESPECIFICA_FULL_LINE_RE.match(line)
-    if not match:
-        return None
-    next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
-    if (next_line or "").strip().startswith(":"):
-        return None
-    if line == line.lower():
-        return None
-    return match
-
 SECTION_LABEL_PATTERNS = [
     ("descricao_indicador", re.compile(r"^Descri[cç][aã]o do Indicador:\s*(.*)", re.IGNORECASE)),
-    ("formula",             re.compile(r"^F[oó]rmula:\s*(.*)",                   re.IGNORECASE)),
-    ("carteira_mjsp",       re.compile(r"^Carteira de Pol[íi]ticas do MJSP:\s*(.*)", re.IGNORECASE)),
-    ("meta_pnsp",           re.compile(r"^Meta do PNSP:\s*(.*)",                 re.IGNORECASE)),
-    ("meta_pesp",           re.compile(r"^Meta do PESP:\s*(.*)",                 re.IGNORECASE)),
-    ("periodicidade",       re.compile(r"^Periodicidade:\s*(.*)",                 re.IGNORECASE)),
-    ("fonte_ano",           re.compile(
-        r"^(?:Fonte(?:/Ano)?|Valor de Refer[eê]ncia(?:/Fonte)?)\s*:\s*(.*)",
-        re.IGNORECASE,
-    )),
+    ("formula", re.compile(r"^F[oó]rmula:\s*(.*)", re.IGNORECASE)),
+    ("carteira_mjsp", re.compile(r"^Carteira de Pol[íi]ticas do MJSP:\s*(.*)", re.IGNORECASE)),
+    ("meta_pnsp", re.compile(r"^Meta do PNSP:\s*(.*)", re.IGNORECASE)),
+    ("meta_pesp", re.compile(r"^Meta do PESP:\s*(.*)", re.IGNORECASE)),
+    ("periodicidade", re.compile(r"^Periodicidade:\s*(.*)", re.IGNORECASE)),
+    (
+        "fonte_ano",
+        re.compile(
+            r"^(?:Fonte(?:/Ano)?|Valor de Refer[eê]ncia(?:/Fonte)?)\s*:\s*(.*)",
+            re.IGNORECASE,
+        ),
+    ),
 ]
-
 TECHNICAL_FIELD_FLAGS = (
-    "saw_status", "saw_descricao_indicador", "saw_formula", "saw_carteira_mjsp",
+    "saw_status",
+    "saw_descricao_indicador",
+    "saw_formula",
+    "saw_carteira_mjsp",
 )
 FIELD_TO_FLAG = {
     "descricao_indicador": "saw_descricao_indicador",
-    "formula":             "saw_formula",
-    "carteira_mjsp":       "saw_carteira_mjsp",
+    "formula": "saw_formula",
+    "carteira_mjsp": "saw_carteira_mjsp",
 }
 META_PESP_CUTOFF_RE = re.compile(
     r"\b(?:Periodicidade|Fonte(?:/Ano)?|Valor de Refer[eê]ncia(?:/Fonte)?)\s*:",
@@ -375,7 +341,7 @@ def extract_meta_geral(lines) -> str:
         if META_GERAL_LINE_RE.match(line):
             collected = []
             for next_line in lines[idx + 1:]:
-                if re.match(r"^(Justificativa|Indicador Geral de Resultado|META ESPEC[ÍI]FICA)", next_line, re.IGNORECASE):
+                if re.match(rf"^(Justificativa|Indicador Geral de Resultado|{META_HEADER_PATTERN})", next_line, re.IGNORECASE):
                     break
                 collected.append(next_line)
             return blank_if_dash_only(" ".join(collected))
@@ -392,7 +358,7 @@ def _extract_text_after_marker(line: str, marker_pattern) -> str:
 def extract_indicador_geral_completo(lines) -> str:
     for idx, line in enumerate(lines):
         has_indicator_marker = bool(INDICADOR_GERAL_MARKER_RE.search(line or ""))
-        is_indicator_header  = bool(INDICADOR_GERAL_LINE_RE.match(line or ""))
+        is_indicator_header = bool(INDICADOR_GERAL_LINE_RE.match(line or ""))
         is_meta_inline_indicator = bool(
             re.match(r"^Meta Geral\s*:", line or "", re.IGNORECASE)
             and has_indicator_marker
@@ -404,45 +370,40 @@ def extract_indicador_geral_completo(lines) -> str:
         if inline:
             collected.append(inline)
         for next_line in lines[idx + 1:]:
-            if re.match(r"^META ESPEC[ÍI]FICA", next_line, re.IGNORECASE):
-                break
-            if re.match(r"^A[ÇC][ÃA]O\s*/\s*$", next_line, re.IGNORECASE):
+            if re.match(rf"^{META_HEADER_PATTERN}", next_line, re.IGNORECASE):
                 break
             if re.match(r"^Meta Geral", next_line, re.IGNORECASE):
-                inline_meta = _extract_text_after_marker(next_line, INDICADOR_GERAL_MARKER_RE)
+                inline_meta = _extract_text_after_marker(
+                    next_line, INDICADOR_GERAL_MARKER_RE
+                )
                 if inline_meta:
                     collected.append(inline_meta)
                     continue
                 break
             if INDICADOR_GERAL_MARKER_RE.search(next_line):
-                inline_next = _extract_text_after_marker(next_line, INDICADOR_GERAL_MARKER_RE)
+                inline_next = _extract_text_after_marker(
+                    next_line, INDICADOR_GERAL_MARKER_RE
+                )
                 if inline_next:
                     collected.append(inline_next)
                 continue
             if re.match(r"^(Itens da Meta|Status:)", next_line, re.IGNORECASE):
                 break
             collected.append(next_line)
-        indicador = blank_if_dash_only(EXAMPLE_BLOCK_RE.sub("", " ".join(collected)).strip())
+        indicador = blank_if_dash_only(" ".join(collected))
         if indicador:
             return indicador
     return ""
 
 
 def extract_indicador_geral_valor_referencia(lines) -> str:
-    """Extrai o Valor de Referência do Indicador Geral (Meta Geral) — usado como fallback."""
     for idx, line in enumerate(lines):
-        # Só busca ANTES da primeira META ESPECÍFICA
-        if META_ESPECIFICA_LINE_RE.match(line):
-            break
         marker_match = VALOR_REFERENCIA_RE.search(line)
         if not marker_match:
             continue
         collected = [line[marker_match.start():].strip()]
         for next_line in lines[idx + 1:]:
-            if re.match(
-                r"^(META ESPEC[ÍI]FICA|Descri[cç][aã]o do Indicador:|Itens da Meta|Status:)",
-                next_line, re.IGNORECASE
-            ):
+            if re.match(rf"^({META_HEADER_PATTERN}|Descri[cç][aã]o do Indicador:|Itens da Meta|Status:)", next_line, re.IGNORECASE):
                 break
             collected.append(next_line)
         return blank_if_dash_only(" ".join(collected))
@@ -451,19 +412,24 @@ def extract_indicador_geral_valor_referencia(lines) -> str:
 
 def extract_analysis_data(lines):
     return {
-        "zero_indicador_geral":   extract_indicador_geral_completo(lines),
-        "one_meta_geral":         extract_meta_geral(lines),
+        "zero_indicador_geral": extract_indicador_geral_completo(lines),
+        "one_meta_geral": extract_meta_geral(lines),
         "three_valor_referencia": extract_indicador_geral_valor_referencia(lines),
-        "sections":               extract_meta_especifica_sections(lines),
+        "sections": extract_meta_especifica_sections(lines),
     }
 
 
 def _finalize_meta_section(section):
     result = {"numero_meta": section["numero_meta"]}
     for key in (
-        "meta_texto", "descricao_indicador", "formula",
-        "meta_pesp", "meta_pnsp", "carteira_mjsp",
-        "periodicidade", "fonte_ano",
+        "meta_texto",
+        "descricao_indicador",
+        "formula",
+        "meta_pesp",
+        "meta_pnsp",
+        "carteira_mjsp",
+        "periodicidade",
+        "fonte_ano",
     ):
         result[key] = blank_if_dash_only(" ".join(section.get(key, [])))
     return result
@@ -487,8 +453,14 @@ def _dedupe_sections_keep_last(sections):
 
 
 def _merge_sections_prefer_technical(all_sections, technical_sections):
-    technical_by_meta = {s.get("numero_meta"): s for s in technical_sections}
-    return [technical_by_meta.get(s.get("numero_meta"), s) for s in all_sections]
+    technical_by_meta = {
+        section.get("numero_meta"): section for section in technical_sections
+    }
+    merged = []
+    for section in all_sections:
+        meta_num = section.get("numero_meta")
+        merged.append(technical_by_meta.get(meta_num, section))
+    return merged
 
 
 def _trim_meta_pesp(text: str) -> str:
@@ -506,18 +478,25 @@ def extract_meta_especifica_sections(lines):
     current = None
     current_field = None
 
-    for idx, line in enumerate(lines):
-        meta_match = _is_real_meta_especifica_header(lines, idx)
+    for line in lines:
+        meta_match = META_ESPECIFICA_LINE_RE.match(line)
         if meta_match:
             if current is not None:
                 sections.append(current)
             current = {
                 "numero_meta": int(meta_match.group(1)),
-                "meta_texto": [], "descricao_indicador": [], "formula": [],
-                "meta_pesp": [], "meta_pnsp": [], "carteira_mjsp": [],
-                "periodicidade": [], "fonte_ano": [],
-                "saw_status": False, "saw_descricao_indicador": False,
-                "saw_formula": False, "saw_carteira_mjsp": False,
+                "meta_texto": [],
+                "descricao_indicador": [],
+                "formula": [],
+                "meta_pesp": [],
+                "meta_pnsp": [],
+                "carteira_mjsp": [],
+                "periodicidade": [],
+                "fonte_ano": [],
+                "saw_status": False,
+                "saw_descricao_indicador": False,
+                "saw_formula": False,
+                "saw_carteira_mjsp": False,
             }
             current_field = "meta_texto"
             continue
@@ -569,16 +548,19 @@ def extract_meta_especifica_sections(lines):
     if current is not None:
         sections.append(current)
 
-    finalized_sections = [_finalize_meta_section(s) for s in sections]
+    finalized_sections = [_finalize_meta_section(section) for section in sections]
     finalized_sections = _dedupe_sections_keep_last(finalized_sections)
 
     technical_sections = [
-        _finalize_meta_section(s) for s in sections if _is_technical_meta_section(s)
+        _finalize_meta_section(section)
+        for section in sections
+        if _is_technical_meta_section(section)
     ]
     technical_sections = _dedupe_sections_keep_last(technical_sections)
 
-    merged_sections = _merge_sections_prefer_technical(finalized_sections, technical_sections)
-    merged_sections = sorted(merged_sections, key=lambda s: s.get("numero_meta", 0))
+    merged_sections = _merge_sections_prefer_technical(
+        finalized_sections, technical_sections
+    )
 
     for section in merged_sections:
         section["meta_pesp"] = _trim_meta_pesp(section.get("meta_pesp", ""))
@@ -588,7 +570,7 @@ def extract_meta_especifica_sections(lines):
 def extract_fields(item_lines):
     fields = {key: [] for key, _ in CAPTURE_PATTERNS}
     fields["acao"] = []
-    fields["art"]  = []
+    fields["art"] = []
     fields["art_num"] = ""
     current_field = None
 
@@ -613,7 +595,7 @@ def extract_fields(item_lines):
         art_match = ART_PATTERN.match(line)
         if art_match:
             current_field = "art"
-            art_num  = art_match.group(1)
+            art_num = art_match.group(1)
             art_body = art_match.group(3).strip()
             if art_body:
                 fields[current_field].append(art_body)
@@ -664,7 +646,7 @@ def _inject_meta_text(base_text: str, marker: str, value: str) -> str:
 def _inject_descricao_formula(base_text: str, descricao: str, formula: str) -> str:
     if not descricao and not formula:
         return base_text
-    marker_desc    = "Descrição do Indicador:"
+    marker_desc = "Descrição do Indicador:"
     marker_formula = "Fórmula:"
     if marker_desc not in base_text or marker_formula not in base_text:
         parts = []
@@ -673,16 +655,19 @@ def _inject_descricao_formula(base_text: str, descricao: str, formula: str) -> s
         if formula:
             parts.append(f"Fórmula: {formula}")
         return "\n\n".join(parts)
-    pre        = base_text.split(marker_desc, 1)[0]
+
+    pre = base_text.split(marker_desc, 1)[0]
     after_desc = base_text.split(marker_desc, 1)[1]
     after_formula = after_desc.split(marker_formula, 1)[1] if marker_formula in after_desc else ""
     suffix_idx = after_formula.find("O indicador")
-    suffix     = f"\n\n{after_formula[suffix_idx:].strip()}" if suffix_idx != -1 else ""
-    return f"{pre}{marker_desc}\n{descricao or ''}\n\n{marker_formula}\n{formula or ''}{suffix}"
+    suffix = f"\n\n{after_formula[suffix_idx:].strip()}" if suffix_idx != -1 else ""
+    desc_value = descricao or ""
+    formula_value = formula or ""
+    return f"{pre}{marker_desc}\n{desc_value}\n\n{marker_formula}\n{formula_value}{suffix}"
 
 
 def replace_placeholder_segment(base_text: str, token: str, value: str) -> str:
-    text    = str(base_text or "")
+    text = str(base_text or "")
     pattern = re.compile(re.escape(token) + r".*?" + re.escape(token), re.DOTALL)
     if not pattern.search(text):
         return text
@@ -690,10 +675,10 @@ def replace_placeholder_segment(base_text: str, token: str, value: str) -> str:
 
 
 def set_cell_font_black(ws, cell_ref: str):
-    cell      = ws[cell_ref]
-    font      = copy.copy(cell.font)
+    cell = ws[cell_ref]
+    font = copy.copy(cell.font)
     font.color = "FF000000"
-    cell.font  = font
+    cell.font = font
 
 
 def set_row_top_fonts_black(ws, row: int, start_col: int = 1, end_col: int = 12):
@@ -708,18 +693,17 @@ def collect_analysis_missing_cells(analysis_data):
     if not blank_if_dash_only(analysis_data.get("one_meta_geral", "")):
         missing_cells.add("A8")
 
-    sections  = analysis_data.get("sections") or []
+    sections = analysis_data.get("sections") or []
     reference = blank_if_dash_only(analysis_data.get("three_valor_referencia", ""))
     for idx, section in enumerate(sections, start=1):
         start_row = ANALYSIS_BLOCK_START_ROW + (idx - 1) * ANALYSIS_BLOCK_HEIGHT
         if not blank_if_dash_only(section.get("meta_texto", "")):
             missing_cells.add(f"A{start_row}")
-        # Verifica fonte_ano da seção antes de considerar ausente
-        section_fonte = blank_if_dash_only(section.get("fonte_ano", ""))
-        if not section_fonte and not reference:
+        if not reference:
             missing_cells.add(f"E{start_row}")
-        if not blank_if_dash_only(section.get("descricao_indicador", "")) or \
-           not blank_if_dash_only(section.get("formula", "")):
+        if not blank_if_dash_only(section.get("descricao_indicador", "")) or not blank_if_dash_only(
+            section.get("formula", "")
+        ):
             missing_cells.add(f"F{start_row}")
         if not blank_if_dash_only(section.get("meta_pesp", "")):
             missing_cells.add(f"G{start_row}")
@@ -742,8 +726,17 @@ def build_material(bem, descricao, destinacao):
 
 
 def _count_analysis_blocks(ws) -> int:
-    block_height     = _infer_analysis_block_height(ws)
-    items_title_row  = _find_items_title_row(ws)
+    items_title_row = _find_items_title_row(ws)
+    if items_title_row and items_title_row > ANALYSIS_BLOCK_START_ROW:
+        populated_rows = 0
+        for row in range(ANALYSIS_BLOCK_START_ROW, items_title_row):
+            value = ws.cell(row=row, column=ANALYSIS_BLOCK_START_COL).value
+            if normalize(str(value or "")):
+                populated_rows += 1
+        if populated_rows > 0:
+            return populated_rows
+
+    block_height = _infer_analysis_block_height(ws)
     if items_title_row and items_title_row > ANALYSIS_BLOCK_START_ROW and block_height > 0:
         return max(1, (items_title_row - ANALYSIS_BLOCK_START_ROW) // block_height)
     return 1
@@ -759,19 +752,27 @@ def _find_items_title_row(ws):
 
 def _infer_analysis_block_height(ws) -> int:
     items_title_row = _find_items_title_row(ws)
+
+    first_block_merge_height = None
     for merged in ws.merged_cells.ranges:
         if (
-            merged.min_col == ANALYSIS_BLOCK_START_COL
-            and merged.max_col == ANALYSIS_BLOCK_START_COL
-            and merged.min_row == ANALYSIS_BLOCK_START_ROW
+            merged.min_row == ANALYSIS_BLOCK_START_ROW
+            and merged.min_col >= ANALYSIS_BLOCK_START_COL
+            and merged.max_col <= ANALYSIS_BLOCK_END_COL
         ):
-            h = merged.max_row - merged.min_row + 1
-            if h > 0:
-                return h
+            merge_height = merged.max_row - merged.min_row + 1
+            if merge_height > 0:
+                first_block_merge_height = max(
+                    first_block_merge_height or 0, merge_height
+                )
+    if first_block_merge_height and first_block_merge_height > 0:
+        return first_block_merge_height
+
     if items_title_row and items_title_row > ANALYSIS_BLOCK_START_ROW:
         compact_height = items_title_row - ANALYSIS_BLOCK_START_ROW
         if 1 <= compact_height <= ANALYSIS_BLOCK_HEIGHT:
             return compact_height
+
     return ANALYSIS_BLOCK_HEIGHT
 
 
@@ -783,37 +784,42 @@ def _copy_analysis_block(ws, src_start_row: int, dst_start_row: int, block_heigh
         for col in range(ANALYSIS_BLOCK_START_COL, ANALYSIS_BLOCK_END_COL + 1):
             src_cell = ws.cell(src_row, col)
             dst_cell = ws.cell(dst_row, col)
-            dst_cell.value        = src_cell.value
-            dst_cell.font         = copy.copy(src_cell.font)
-            dst_cell.fill         = copy.copy(src_cell.fill)
-            dst_cell.border       = copy.copy(src_cell.border)
-            dst_cell.alignment    = copy.copy(src_cell.alignment)
+            dst_cell.value = src_cell.value
+            dst_cell.font = copy.copy(src_cell.font)
+            dst_cell.fill = copy.copy(src_cell.fill)
+            dst_cell.border = copy.copy(src_cell.border)
+            dst_cell.alignment = copy.copy(src_cell.alignment)
             dst_cell.number_format = src_cell.number_format
-            dst_cell.protection   = copy.copy(src_cell.protection)
+            dst_cell.protection = copy.copy(src_cell.protection)
 
     shift = dst_start_row - src_start_row
     template_merges = [
-        rng for rng in list(ws.merged_cells.ranges)
-        if (
-            rng.min_row >= src_start_row
-            and rng.max_row < src_start_row + block_height
-            and rng.min_col >= ANALYSIS_BLOCK_START_COL
-            and rng.max_col <= ANALYSIS_BLOCK_END_COL
-        )
+            rng
+            for rng in list(ws.merged_cells.ranges)
+            if (
+                rng.min_row >= src_start_row
+                and rng.max_row < src_start_row + block_height
+                and rng.min_col >= ANALYSIS_BLOCK_START_COL
+                and rng.max_col <= ANALYSIS_BLOCK_END_COL
+            )
     ]
     for rng in template_merges:
         ws.merge_cells(
-            start_row=rng.min_row + shift, start_column=rng.min_col,
-            end_row=rng.max_row + shift,   end_column=rng.max_col,
+            start_row=rng.min_row + shift,
+            start_column=rng.min_col,
+            end_row=rng.max_row + shift,
+            end_column=rng.max_col,
         )
 
 
 def _unmerge_analysis_block_region(ws, block_start_row: int, block_height: int):
     block_end_row = block_start_row + block_height - 1
     to_unmerge = [
-        str(rng) for rng in list(ws.merged_cells.ranges)
+        str(rng)
+        for rng in list(ws.merged_cells.ranges)
         if (
-            rng.min_row >= block_start_row and rng.max_row <= block_end_row
+            rng.min_row >= block_start_row
+            and rng.max_row <= block_end_row
             and rng.min_col >= ANALYSIS_BLOCK_START_COL
             and rng.max_col <= ANALYSIS_BLOCK_END_COL
         )
@@ -826,18 +832,27 @@ def _shift_row_dimensions_on_insert(ws, insert_at: int, amount: int):
     if amount <= 0:
         return
     rows_to_shift = sorted(
-        [r for r in ws.row_dimensions if isinstance(r, int) and r >= insert_at],
+        [
+            row_idx
+            for row_idx in ws.row_dimensions
+            if isinstance(row_idx, int) and row_idx >= insert_at
+        ],
         reverse=True,
     )
     for row_idx in rows_to_shift:
-        dim_copy       = copy.copy(ws.row_dimensions[row_idx])
+        dim_copy = copy.copy(ws.row_dimensions[row_idx])
         dim_copy.index = row_idx + amount
         ws.row_dimensions[row_idx + amount] = dim_copy
         del ws.row_dimensions[row_idx]
 
 
 def _ranges_overlap(a, b) -> bool:
-    return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
+    return not (
+        a[2] < b[0]
+        or b[2] < a[0]
+        or a[3] < b[1]
+        or b[3] < a[1]
+    )
 
 
 def _insert_rows_preserving_merges(ws, insert_at: int, amount: int):
@@ -867,31 +882,42 @@ def _insert_rows_preserving_merges(ws, insert_at: int, amount: int):
     for min_row, min_col, max_row, max_col in original_ranges:
         if max_row < insert_at:
             add_range(min_row, min_col, max_row, max_col)
-        elif min_row >= insert_at:
-            add_range(min_row + amount, min_col, max_row + amount, max_col)
-        else:
-            add_range(min_row, min_col, insert_at - 1, max_col)
-            add_range(insert_at + amount, min_col, max_row + amount, max_col)
+            continue
+        if min_row >= insert_at:
+            add_range(
+                min_row + amount,
+                min_col,
+                max_row + amount,
+                max_col,
+            )
+            continue
+        # Split merges that cross the insertion point to avoid invalid overlaps.
+        add_range(min_row, min_col, insert_at - 1, max_col)
+        add_range(insert_at + amount, min_col, max_row + amount, max_col)
 
     for min_row, min_col, max_row, max_col in rebuilt:
         ws.merge_cells(
-            start_row=min_row, start_column=min_col,
-            end_row=max_row,   end_column=max_col,
+            start_row=min_row,
+            start_column=min_col,
+            end_row=max_row,
+            end_column=max_col,
         )
 
 
 def _ensure_analysis_blocks(ws, required_blocks: int):
-    block_height    = _infer_analysis_block_height(ws)
+    block_height = _infer_analysis_block_height(ws)
     existing_blocks = _count_analysis_blocks(ws)
     if required_blocks <= existing_blocks:
         return
-    items_title_row       = _find_items_title_row(ws)
-    extra_blocks          = required_blocks - existing_blocks
+    items_title_row = _find_items_title_row(ws)
+
+    extra_blocks = required_blocks - existing_blocks
     additional_rows_needed = extra_blocks * block_height
-    insert_at             = ANALYSIS_BLOCK_START_ROW + existing_blocks * block_height
-    minimum_gap_rows      = 1
+    insert_at = ANALYSIS_BLOCK_START_ROW + existing_blocks * block_height
+    minimum_gap_rows = 1
 
     if items_title_row and items_title_row <= insert_at:
+        # Keep items table below the dynamic analysis block area.
         rows_to_shift_items = (insert_at - items_title_row) + minimum_gap_rows
         _insert_rows_preserving_merges(ws, items_title_row, rows_to_shift_items)
         items_title_row += rows_to_shift_items
@@ -901,7 +927,6 @@ def _ensure_analysis_blocks(ws, required_blocks: int):
         reusable_gap_rows = max(0, (items_title_row - insert_at) - minimum_gap_rows)
     rows_to_insert = max(0, additional_rows_needed - reusable_gap_rows)
     _insert_rows_preserving_merges(ws, insert_at, rows_to_insert)
-
     for block_idx in range(existing_blocks + 1, required_blocks + 1):
         dst_start_row = ANALYSIS_BLOCK_START_ROW + (block_idx - 1) * block_height
         _unmerge_analysis_block_region(ws, dst_start_row, block_height)
@@ -909,20 +934,26 @@ def _ensure_analysis_blocks(ws, required_blocks: int):
 
 
 def fill_analysis_template(ws, lines):
-    analysis_data    = extract_analysis_data(lines)
-    indicador_geral  = analysis_data["zero_indicador_geral"]
-    meta_geral       = analysis_data["one_meta_geral"]
-    valor_referencia = analysis_data["three_valor_referencia"]  # fallback global
-    sections         = analysis_data["sections"]
+    analysis_data = extract_analysis_data(lines)
+    indicador_geral = analysis_data["zero_indicador_geral"]
+    meta_geral = analysis_data["one_meta_geral"]
+    valor_referencia = analysis_data["three_valor_referencia"]
+    sections = analysis_data["sections"]
 
-    base_a8     = str(ws["A8"].value or "")
+    base_a8 = str(ws["A8"].value or "")
     a8_replaced = replace_placeholder_segment(base_a8, "1*", meta_geral)
-    ws["A8"]    = a8_replaced if a8_replaced != base_a8 else (meta_geral or base_a8)
+    if a8_replaced != base_a8:
+        ws["A8"] = a8_replaced
+    elif meta_geral:
+        ws["A8"] = meta_geral
     set_cell_font_black(ws, "A8")
 
-    base_f10     = str(ws["F10"].value or "")
+    base_f10 = str(ws["F10"].value or "")
     f10_replaced = replace_placeholder_segment(base_f10, "0*", indicador_geral)
-    ws["F10"]    = f10_replaced if f10_replaced != base_f10 else (indicador_geral or base_f10)
+    if f10_replaced != base_f10:
+        ws["F10"] = f10_replaced
+    elif indicador_geral:
+        ws["F10"] = indicador_geral
     set_cell_font_black(ws, "F10")
 
     if not sections:
@@ -937,70 +968,73 @@ def fill_analysis_template(ws, lines):
         _copy_analysis_block(ws, ANALYSIS_BLOCK_START_ROW, start_row, block_height)
 
     for idx, section in enumerate(sections, start=1):
-        start_row     = ANALYSIS_BLOCK_START_ROW + (idx - 1) * block_height
+        start_row = ANALYSIS_BLOCK_START_ROW + (idx - 1) * block_height
         meta_text_raw = section.get("meta_texto", "")
-        meta_text     = re.sub(r"^\d+\s*-\s*", "", meta_text_raw).strip()
+        meta_text = re.sub(r"^\d+\s*-\s*", "", meta_text_raw).strip()
         two_meta_texto = f"{idx} - {meta_text}" if meta_text else ""
 
-        # Coluna A — texto da meta específica
-        cell_a    = f"A{start_row}"
-        base_a    = str(ws[cell_a].value or "")
+        cell_a = f"A{start_row}"
+        base_a = str(ws[cell_a].value or "")
         a_replaced = replace_placeholder_segment(base_a, "2*", two_meta_texto)
         ws[cell_a] = a_replaced if a_replaced != base_a else two_meta_texto
 
-        # ── CORREÇÃO PRINCIPAL ──────────────────────────────────────────────
-        # Coluna E — Valor de Referência/Fonte da própria meta específica.
-        # Usa o campo "fonte_ano" extraído da seção; só recorre ao valor da
-        # Meta Geral se a seção não tiver seu próprio valor de referência.
-        cell_e         = f"E{start_row}"
-        base_e         = str(ws[cell_e].value or "")
-        section_fonte  = blank_if_dash_only(section.get("fonte_ano", ""))
-        valor_ref_section = section_fonte if section_fonte else valor_referencia
-        e_replaced     = replace_placeholder_segment(base_e, "3*", valor_ref_section)
+        cell_e = f"E{start_row}"
+        base_e = str(ws[cell_e].value or "")
+        e_replaced = replace_placeholder_segment(base_e, "3*", valor_referencia)
         if e_replaced == base_e:
-            e_replaced = _inject_reference_text(base_e, valor_ref_section)
+            e_replaced = _inject_reference_text(base_e, valor_referencia)
         ws[cell_e] = e_replaced
-        # ───────────────────────────────────────────────────────────────────
 
-        # Coluna F — Descrição do Indicador + Fórmula
-        cell_f    = f"F{start_row}"
-        base_f    = str(ws[cell_f].value or "")
+        cell_f = f"F{start_row}"
+        base_f = str(ws[cell_f].value or "")
         f_replaced = replace_placeholder_segment(base_f, "4*", section.get("descricao_indicador", ""))
         f_replaced = replace_placeholder_segment(f_replaced, "5*", section.get("formula", ""))
         if f_replaced == base_f:
             f_replaced = _inject_descricao_formula(
-                base_f, section.get("descricao_indicador", ""), section.get("formula", ""),
+                base_f,
+                section.get("descricao_indicador", ""),
+                section.get("formula", ""),
             )
         ws[cell_f] = f_replaced
 
-        # Coluna G — Meta do PESP
-        cell_g    = f"G{start_row}"
-        base_g    = str(ws[cell_g].value or "")
+        cell_g = f"G{start_row}"
+        base_g = str(ws[cell_g].value or "")
         g_replaced = replace_placeholder_segment(base_g, "6*", section.get("meta_pesp", ""))
         if g_replaced == base_g:
-            g_replaced = _inject_meta_text(base_g, "A Meta informada foi:", section.get("meta_pesp", ""))
+            g_replaced = _inject_meta_text(
+                base_g,
+                "A Meta informada foi:",
+                section.get("meta_pesp", ""),
+            )
         ws[cell_g] = g_replaced
 
-        # Coluna H — Meta do PNSP
-        cell_h    = f"H{start_row}"
-        base_h    = str(ws[cell_h].value or "")
+        cell_h = f"H{start_row}"
+        base_h = str(ws[cell_h].value or "")
         h_replaced = replace_placeholder_segment(base_h, "7*", section.get("meta_pnsp", ""))
         if h_replaced == base_h:
-            h_replaced = _inject_meta_text(base_h, "A Meta informada foi:", section.get("meta_pnsp", ""))
+            h_replaced = _inject_meta_text(
+                base_h,
+                "A Meta informada foi:",
+                section.get("meta_pnsp", ""),
+            )
         ws[cell_h] = h_replaced
 
-        # Coluna I — Carteira de Políticas do MJSP
-        cell_i    = f"I{start_row}"
-        base_i    = str(ws[cell_i].value or "")
-        i_replaced = replace_placeholder_segment(base_i, "8*", section.get("carteira_mjsp", ""))
+        cell_i = f"I{start_row}"
+        base_i = str(ws[cell_i].value or "")
+        i_replaced = replace_placeholder_segment(
+            base_i, "8*", section.get("carteira_mjsp", "")
+        )
         if i_replaced == base_i:
-            i_replaced = _inject_meta_text(base_i, "A política informada foi:", section.get("carteira_mjsp", ""))
+            i_replaced = _inject_meta_text(
+                base_i,
+                "A política informada foi:",
+                section.get("carteira_mjsp", ""),
+            )
         ws[cell_i] = i_replaced
-
         set_row_top_fonts_black(ws, start_row, 1, 12)
 
-
 def fill_worksheet(ws, rows, header_map, start_row=3):
+    # Clear previous data (keep headers)
     max_col = max(header_map.values()) if header_map else ws.max_column
     for row in ws.iter_rows(min_row=start_row, max_row=ws.max_row, max_col=max_col):
         for cell in row:
@@ -1070,20 +1104,104 @@ def get_analysis_items_header_info(template_path: Path):
     return header_row, headers, header_map
 
 
-def update_action_header(ws, rows, header_map, art_num_preferred=None, header_row=2):
+def update_action_header(
+    ws,
+    rows,
+    header_map,
+    art_num_preferred=None,
+    action_header_title_preferred=None,
+    header_row=2,
+):
     col_idx = header_map.get(ACTION_HEADER_KEY)
     if not col_idx or not rows:
         return
-    art_num = art_num_preferred or rows[0].get(ACTION_HEADER_NUM_KEY)
-    if not art_num or str(art_num) not in {"6", "7", "8"}:
+    if action_header_title_preferred:
+        ws.cell(
+            row=header_row,
+            column=col_idx,
+            value=action_header_title_preferred,
+        )
         return
-    ws.cell(row=header_row, column=col_idx,
-            value=f"Ação conforme Art. {art_num}º da portaria nº 685")
+    art_num = art_num_preferred
+    if not art_num:
+        counts = {}
+        first_position = {}
+        for idx, row in enumerate(rows):
+            candidate = str(row.get(ACTION_HEADER_NUM_KEY) or "").strip()
+            if candidate not in {"6", "7", "8"}:
+                continue
+            counts[candidate] = counts.get(candidate, 0) + 1
+            if candidate not in first_position:
+                first_position[candidate] = idx
+        best_art = None
+        best_count = -1
+        best_pos = len(rows) + 1
+        for candidate, count in counts.items():
+            pos = first_position[candidate]
+            if count > best_count or (count == best_count and pos < best_pos):
+                best_art = candidate
+                best_count = count
+                best_pos = pos
+        art_num = best_art
+    if not art_num:
+        return
+    if str(art_num) not in {"6", "7", "8"}:
+        return
+    ws.cell(
+        row=header_row,
+        column=col_idx,
+        value=f"Ação conforme Art. {art_num}º da portaria nº 685",
+    )
+
+
+def write_excel(
+    template_path: Path,
+    output_path: Path,
+    rows,
+    header_map,
+    art_num_preferred=None,
+    action_header_title_preferred=None,
+    source_lines=None,
+):
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb.active
+    if is_analysis_template_sheet(ws):
+        fill_analysis_template(ws, source_lines or [])
+        header_row = find_items_table_header_row(ws)
+        if header_row and rows:
+            _, items_header_map = get_header_info_from_ws(ws, header_row)
+            update_action_header(
+                ws,
+                rows,
+                items_header_map,
+                art_num_preferred=art_num_preferred,
+                action_header_title_preferred=action_header_title_preferred,
+                header_row=header_row,
+            )
+            fill_worksheet(ws, rows, items_header_map, start_row=header_row + 1)
+    else:
+        update_action_header(
+            ws,
+            rows,
+            header_map,
+            art_num_preferred=art_num_preferred,
+            action_header_title_preferred=action_header_title_preferred,
+        )
+        fill_worksheet(ws, rows, header_map)
+    ws.sheet_view.topLeftCell = "A1"
+    ws.sheet_view.selection[0].activeCell = "A1"
+    ws.sheet_view.selection[0].sqref = "A1"
+    ws.sheet_view.zoomScale = 100
+    wb.save(output_path)
 
 
 def generate_excel_bytes(
-    template_path: Path, rows, header_map,
-    art_num_preferred=None, source_lines=None,
+    template_path: Path,
+    rows,
+    header_map,
+    art_num_preferred=None,
+    action_header_title_preferred=None,
+    source_lines=None,
 ) -> bytes:
     wb = openpyxl.load_workbook(template_path)
     ws = wb.active
@@ -1092,41 +1210,51 @@ def generate_excel_bytes(
         header_row = find_items_table_header_row(ws)
         if header_row and rows:
             _, items_header_map = get_header_info_from_ws(ws, header_row)
-            update_action_header(ws, rows, items_header_map,
-                                 art_num_preferred=art_num_preferred, header_row=header_row)
+            update_action_header(
+                ws,
+                rows,
+                items_header_map,
+                art_num_preferred=art_num_preferred,
+                action_header_title_preferred=action_header_title_preferred,
+                header_row=header_row,
+            )
             fill_worksheet(ws, rows, items_header_map, start_row=header_row + 1)
     else:
-        update_action_header(ws, rows, header_map, art_num_preferred=art_num_preferred)
+        update_action_header(
+            ws,
+            rows,
+            header_map,
+            art_num_preferred=art_num_preferred,
+            action_header_title_preferred=action_header_title_preferred,
+        )
         fill_worksheet(ws, rows, header_map)
-    ws.sheet_view.topLeftCell              = "A1"
-    ws.sheet_view.selection[0].activeCell  = "A1"
-    ws.sheet_view.selection[0].sqref       = "A1"
-    ws.sheet_view.zoomScale                = 100
+    ws.sheet_view.topLeftCell = "A1"
+    ws.sheet_view.selection[0].activeCell = "A1"
+    ws.sheet_view.selection[0].sqref = "A1"
+    ws.sheet_view.zoomScale = 100
     buffer = BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
 
 
 def build_rows(parsed_items, header_map):
-    has_descricao         = "Descrição"       in header_map
-    has_destinacao        = "Destinação"      in header_map
+    has_descricao = "Descrição" in header_map
+    has_destinacao = "Destinação" in header_map
     has_quantidade_unidade = "Quantidade/Unidade" in header_map
-    has_valor_status      = "Valor/Status"    in header_map
-    has_unidade_col       = "Unidade de Medida" in header_map
-    has_status_col        = "Status do Item"  in header_map
+    has_valor_status = "Valor/Status" in header_map
+    has_unidade_col = "Unidade de Medida" in header_map
+    has_status_col = "Status do Item" in header_map
     rows = []
     for item in parsed_items:
         fields = extract_fields(item["lines"])
-        material = (
-            fields["bem"]
-            if has_descricao or has_destinacao
-            else build_material(fields["bem"], fields["descricao"], fields["destinacao"])
-        )
-        valor_total  = format_currency(fields["valor_total"])
-        quantidade   = parse_int(fields["quantidade"])
-        unidade      = fields["unidade"]
-        status_item  = item.get("status") or "Planejado"
-
+        if has_descricao or has_destinacao:
+            material = fields["bem"]
+        else:
+            material = build_material(fields["bem"], fields["descricao"], fields["destinacao"])
+        valor_total = format_currency(fields["valor_total"])
+        quantidade = parse_int(fields["quantidade"])
+        unidade = fields["unidade"]
+        status_item = item.get("status") or "Planejado"
         quantidade_unidade = ""
         if has_quantidade_unidade and not has_unidade_col:
             if quantidade != "" and unidade:
@@ -1135,7 +1263,6 @@ def build_rows(parsed_items, header_map):
                 quantidade_unidade = str(quantidade)
             elif unidade:
                 quantidade_unidade = unidade
-
         valor_status = ""
         if has_valor_status and not has_status_col:
             if valor_total and status_item:
@@ -1144,22 +1271,88 @@ def build_rows(parsed_items, header_map):
                 valor_status = valor_total
             elif status_item:
                 valor_status = status_item
-
-        rows.append({
-            "Número da Meta Específica":                 item["meta"],
-            "Número do Item":                            item["item"],
-            ACTION_HEADER_KEY:                           fields["acao"] or fields["art"],
-            ACTION_HEADER_NUM_KEY:                       fields["art_num"],
-            "Material/Serviço":                          material,
-            "Descrição":                                 fields["descricao"] if has_descricao else "",
-            "Destinação":                                fields["destinacao"] if has_destinacao else "",
-            "Instituição":                               fields["instituicao"],
-            "Natureza da Despesa":                       fields["natureza"],
-            "Quantidade Planejada":                      quantidade,
-            "Unidade de Medida":                         fields["unidade"],
-            "Quantidade/Unidade":                        quantidade_unidade,
-            "Valor Planejado Total":                     valor_total,
-            "Status do Item":                            status_item,
-            "Valor/Status":                              valor_status,
-        })
+        row = {
+            "Número da Meta Específica": item["meta"],
+            "Número do Item": item["item"],
+            ACTION_HEADER_KEY: fields["acao"] or fields["art"],
+            ACTION_HEADER_NUM_KEY: fields["art_num"],
+            "Material/Serviço": material,
+            "Descrição": fields["descricao"] if has_descricao else "",
+            "Destinação": fields["destinacao"] if has_destinacao else "",
+            "Instituição": fields["instituicao"],
+            "Natureza da Despesa": fields["natureza"],
+            "Quantidade Planejada": quantidade,
+            "Unidade de Medida": fields["unidade"],
+            "Quantidade/Unidade": quantidade_unidade,
+            "Valor Planejado Total": valor_total,
+            "Status do Item": status_item,
+            "Valor/Status": valor_status,
+        }
+        rows.append(row)
     return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Preenche planilha a partir do PDF.")
+    parser.add_argument("--pdf", default="Planos de Aplicação.pdf", help="PDF de entrada")
+    parser.add_argument(
+        "--xlsx",
+        default=REQUIRED_TEMPLATE_NAME,
+        help=f"Template obrigatório ({REQUIRED_TEMPLATE_NAME})",
+    )
+    parser.add_argument("--output", default="Itens NT - preenchido.xlsx", help="Planilha de saída")
+    args = parser.parse_args()
+
+    pdf_path = Path(args.pdf)
+    xlsx_path = Path(args.xlsx)
+    output_path = Path(args.output)
+
+    if xlsx_path.name != REQUIRED_TEMPLATE_NAME:
+        raise SystemExit(
+            "Template não permitido. Use apenas: "
+            f"{REQUIRED_TEMPLATE_NAME}"
+        )
+
+    if not pdf_path.exists():
+        raise SystemExit(f"PDF não encontrado: {pdf_path}")
+    if not xlsx_path.exists():
+        raise SystemExit(f"Planilha não encontrada: {xlsx_path}")
+
+    lines = extract_lines_from_pdf(pdf_path)
+    parsed_items = parse_items(lines)
+    if not parsed_items:
+        raise SystemExit("Nenhum item encontrado no PDF.")
+
+    signature = extract_plan_signature(lines)
+    art_num_preferred = resolve_art_by_plan_rule(signature["sigla"], signature["ano"])
+    action_header_title_preferred = resolve_action_header_title_by_plan(
+        signature["sigla"], signature["ano"]
+    )
+    analysis_mode = is_analysis_template_file(xlsx_path)
+    if analysis_mode:
+        _, _, items_header_map = get_analysis_items_header_info(xlsx_path)
+        if not items_header_map:
+            raise SystemExit(
+                "Não foi possível localizar a tabela de itens no template de análise."
+            )
+        rows = build_rows(parsed_items, items_header_map)
+        header_map = {}
+    else:
+        _, header_map = get_template_header_info(xlsx_path)
+        rows = build_rows(parsed_items, header_map)
+    write_excel(
+        xlsx_path,
+        output_path,
+        rows,
+        header_map,
+        art_num_preferred=art_num_preferred,
+        action_header_title_preferred=action_header_title_preferred,
+        source_lines=lines,
+    )
+
+    print(f"Itens extraídos: {len(rows)}")
+    print(f"Arquivo gerado: {output_path}")
+
+
+if __name__ == "__main__":
+    main()
