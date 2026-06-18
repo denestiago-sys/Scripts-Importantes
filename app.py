@@ -6,24 +6,45 @@ import streamlit as st
 from openpyxl.utils import get_column_letter
 import openpyxl
 
-from planilha_engine import (
-    extract_lines_from_pdf_file,
-    extract_plan_signature,
-    resolve_art_by_plan_rule,
-    extract_analysis_data,
-    collect_analysis_missing_cells,
-    is_analysis_template_file,
-    get_analysis_items_header_info,
-    find_items_table_header_row,
-    parse_items,
-    build_rows,
-    generate_excel_bytes,
-    get_template_header_info,
-)
+try:
+    from planilha_engine import (
+        extract_lines_from_pdf_file,
+        extract_plan_signature,
+        resolve_art_by_plan_rule,
+        resolve_action_header_title_by_plan,
+        extract_analysis_data,
+        collect_analysis_missing_cells,
+        is_analysis_template_file,
+        get_analysis_items_header_info,
+        find_items_table_header_row,
+        parse_items,
+        build_rows,
+        generate_excel_bytes,
+        get_template_header_info,
+    )
+except ImportError:
+    from planilha_engine import (
+        extract_lines_from_pdf_file,
+        extract_plan_signature,
+        resolve_art_by_plan_rule,
+        extract_analysis_data,
+        collect_analysis_missing_cells,
+        is_analysis_template_file,
+        get_analysis_items_header_info,
+        find_items_table_header_row,
+        parse_items,
+        build_rows,
+        generate_excel_bytes,
+        get_template_header_info,
+    )
+
+    def resolve_action_header_title_by_plan(sigla, ano):
+        return None
 
 BASE_DIR = Path(__file__).resolve().parent
 LOCAL_TEMPLATE_PATH = BASE_DIR / "Planilha Base(atualizada).xlsx"
 LOGO_PATH = BASE_DIR / "Logo.png"
+FAVICON_PATH = BASE_DIR / "favicon_mj.png"
 REQUIRED_TEMPLATE_NAME = "Planilha Base(atualizada).xlsx"
 
 
@@ -32,8 +53,42 @@ def resolve_template_path():
         return LOCAL_TEMPLATE_PATH, None
     return None, f"Template obrigatório não encontrado: {REQUIRED_TEMPLATE_NAME}."
 
+
+if "show_title_update_modal" not in st.session_state:
+    st.session_state.show_title_update_modal = False
+
+
+def _build_title_modal_decorator():
+    try:
+        return st.dialog(
+            "Atualização de títulos para planos 2023/2024",
+            width="small",
+            dismissible=True,
+            on_dismiss="rerun",
+        )
+    except TypeError:
+        return st.dialog("Atualização de títulos para planos 2023/2024")
+
+
+@_build_title_modal_decorator()
+def _show_title_update_modal():
+    st.markdown(
+        """
+        Os títulos da coluna **Ação conforme Art.** foram atualizados para os planos de **2023 e 2024**.
+
+        Regra aplicada:
+        - `RMV/RMVI`: Art. 5º da Portaria nº 439 **ou** Art. 6º da Portaria nº 685
+        - `EVM`: Art. 6º da Portaria nº 439 **ou** Art. 7º da Portaria nº 685
+        - `MQVPSP`: Art. 7º da Portaria nº 439 **ou** Art. 8º da Portaria nº 685
+        """
+    )
+    if st.button("Ok", key="title_update_modal_ok", type="primary"):
+        st.session_state.show_title_update_modal = False
+        st.rerun()
+
+page_icon = str(FAVICON_PATH) if FAVICON_PATH.exists() else "📄"
 st.set_page_config(
-    page_title="Gerador de Planilha de Itens - FAF", page_icon="📄", layout="centered"
+    page_title="Gerador de Planilha de Itens - FAF", page_icon=page_icon, layout="centered"
 )
 
 st.markdown(
@@ -200,6 +255,9 @@ if st.button("Processar", type="primary", disabled=uploaded_file is None):
                     art_num_preferred = resolve_art_by_plan_rule(
                         signature["sigla"], signature["ano"]
                     )
+                    action_header_title_preferred = resolve_action_header_title_by_plan(
+                        signature["sigla"], signature["ano"]
+                    )
                     if analysis_mode:
                         analysis_data = extract_analysis_data(lines)
                         sections = analysis_data.get("sections", [])
@@ -212,6 +270,7 @@ if st.button("Processar", type="primary", disabled=uploaded_file is None):
                             rows=rows,
                             header_map={},
                             art_num_preferred=art_num_preferred,
+                            action_header_title_preferred=action_header_title_preferred,
                             source_lines=lines,
                         )
                         missing_cells = set(collect_analysis_missing_cells(analysis_data))
@@ -250,6 +309,7 @@ if st.button("Processar", type="primary", disabled=uploaded_file is None):
                             rows,
                             header_map,
                             art_num_preferred=art_num_preferred,
+                            action_header_title_preferred=action_header_title_preferred,
                             source_lines=lines,
                         )
 
@@ -277,6 +337,9 @@ if st.button("Processar", type="primary", disabled=uploaded_file is None):
                             "missing_cells": sorted(missing_cells),
                             "missing_items_count": len(missing_rows),
                         }
+                    st.session_state.show_title_update_modal = (
+                        signature.get("ano") in {2023, 2024}
+                    )
                     status.update(label="Processamento concluído.", state="complete")
         except Exception as exc:
             st.exception(exc)
@@ -303,6 +366,11 @@ if result:
     if missing_count:
         st.warning("Alguns itens possuem campos em branco. Veja os detalhes abaixo.")
 
+    download_blocked_by_modal = st.session_state.get("show_title_update_modal", False)
+    if download_blocked_by_modal:
+        st.session_state.show_title_update_modal = False
+        _show_title_update_modal()
+
     st.download_button(
         "Baixar Planilha",
         data=result["excel_bytes"],
@@ -310,6 +378,12 @@ if result:
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
+        ),
+        disabled=download_blocked_by_modal,
+        help=(
+            "Feche o aviso de atualização (Ok ou X) para liberar o download."
+            if download_blocked_by_modal
+            else None
         ),
     )
 
