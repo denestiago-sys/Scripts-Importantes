@@ -369,6 +369,7 @@ def extract_indicador_geral_completo(lines) -> str:
         inline = _extract_text_after_marker(line, INDICADOR_GERAL_MARKER_RE)
         if inline:
             collected.append(inline)
+        skip_ex_block = False
         for next_line in lines[idx + 1:]:
             if re.match(rf"^{META_HEADER_PATTERN}", next_line, re.IGNORECASE):
                 break
@@ -389,6 +390,28 @@ def extract_indicador_geral_completo(lines) -> str:
                 continue
             if re.match(r"^(Itens da Meta|Status:)", next_line, re.IGNORECASE):
                 break
+            # Skip the entire example block that starts with "EX:".
+            # The block ends when we see a line that looks like real content
+            # (starts with a recognisable field label such as "Indicador:" or
+            # "Fórmula de Cálculo:").
+            if re.match(r"^EX\s*:", next_line, re.IGNORECASE):
+                skip_ex_block = True
+                continue
+            if skip_ex_block:
+                # A line that closes a parenthesis block is still part of EX.
+                if re.match(r"^[^A-Za-záéíóúàâãêôçÁÉÍÓÚÀÂÃÊÔÇ]", next_line):
+                    continue
+                # A line that begins a real labelled field ends the EX block.
+                if re.match(
+                    r"^(Indicador|F[oó]rmula|Valor de Refer|Descri[cç][aã]o|Periodicidade|Fonte)",
+                    next_line,
+                    re.IGNORECASE,
+                ):
+                    skip_ex_block = False
+                else:
+                    # Heuristic: the EX block closes with a ")" — once we pass
+                    # it any remaining continuation lines are also skipped.
+                    continue
             collected.append(next_line)
         indicador = blank_if_dash_only(" ".join(collected))
         if indicador:
@@ -648,6 +671,20 @@ def _inject_descricao_formula(base_text: str, descricao: str, formula: str) -> s
         return base_text
     marker_desc = "Descrição do Indicador:"
     marker_formula = "Fórmula:"
+    # Detect alternate injection marker used in analysis templates
+    marker_indicator = "O Indicador e Fórmula de Cálculo informado foi:"
+    if marker_indicator in base_text:
+        pre = base_text.split(marker_indicator, 1)[0]
+        after_indicator = base_text.split(marker_indicator, 1)[1]
+        suffix_idx = after_indicator.find("O indicador")
+        suffix = f"\n\n{after_indicator[suffix_idx:].strip()}" if suffix_idx != -1 else ""
+        parts = []
+        if descricao:
+            parts.append(descricao)
+        if formula:
+            parts.append(formula)
+        body = "\n\n".join(parts)
+        return f"{pre}{marker_indicator}\n\n{body}{suffix}"
     if marker_desc not in base_text or marker_formula not in base_text:
         parts = []
         if descricao:
@@ -699,7 +736,8 @@ def collect_analysis_missing_cells(analysis_data):
         start_row = ANALYSIS_BLOCK_START_ROW + (idx - 1) * ANALYSIS_BLOCK_HEIGHT
         if not blank_if_dash_only(section.get("meta_texto", "")):
             missing_cells.add(f"A{start_row}")
-        if not reference:
+        section_fonte = blank_if_dash_only(section.get("fonte_ano", ""))
+        if not section_fonte and not reference:
             missing_cells.add(f"E{start_row}")
         if not blank_if_dash_only(section.get("descricao_indicador", "")) or not blank_if_dash_only(
             section.get("formula", "")
@@ -980,9 +1018,13 @@ def fill_analysis_template(ws, lines):
 
         cell_e = f"E{start_row}"
         base_e = str(ws[cell_e].value or "")
-        e_replaced = replace_placeholder_segment(base_e, "3*", valor_referencia)
+        # Prefer the section-specific "Valor de Referência/Fonte" over the
+        # global indicator reference — each Meta Específica declares its own.
+        section_fonte = blank_if_dash_only(section.get("fonte_ano", ""))
+        e_reference = section_fonte or valor_referencia
+        e_replaced = replace_placeholder_segment(base_e, "3*", e_reference)
         if e_replaced == base_e:
-            e_replaced = _inject_reference_text(base_e, valor_referencia)
+            e_replaced = _inject_reference_text(base_e, e_reference)
         ws[cell_e] = e_replaced
 
         cell_f = f"F{start_row}"
