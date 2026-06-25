@@ -275,6 +275,14 @@ def parse_items(lines):
             continue
         item_match = ITEM_RE.match(line)
         if item_match:
+            # Lines like "item 42 (Desenvolvimento de...)" that appear in the
+            # strategy/description prose have no status token.  Real item
+            # headers always carry one of Aprovado / Cancelado / Planejado.
+            # Skip matches without a status to avoid false triggers.
+            if not item_match.group(2):
+                if current_item is not None:
+                    current_lines.append(line)
+                continue
             flush()
             current_item = int(item_match.group(1))
             current_status = (item_match.group(2) or "").capitalize()
