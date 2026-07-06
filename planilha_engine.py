@@ -10,7 +10,12 @@ import openpyxl
 from openpyxl.cell.cell import MergedCell
 
 META_HEADER_PATTERN = r"(?:A[ÇC][ÃA]O\s*/\s*)?META ESPEC[ÍI]FICA"
-META_RE = re.compile(rf"^{META_HEADER_PATTERN}\s+(\d+)", re.IGNORECASE)
+# NEGATIVE LOOKAHEAD (?!\s*:) -- FIX: impede que uma menção "META ESPECÍFICA N"
+# dentro do texto de uma Descrição (ex.: "Descrição: META ESPECÍFICA 1: Adquirir...")
+# seja confundida com um cabeçalho de meta de verdade. Cabeçalhos reais nunca são
+# seguidos por ":" logo após o número; essas menções soltas (resquício de planos
+# antigos, comuns em PDFs de 2019-2022) sempre são.
+META_RE = re.compile(rf"^{META_HEADER_PATTERN}\s+(\d+)(?!\s*:)", re.IGNORECASE)
 ITEM_RE = re.compile(
     r"^Item\s*(\d+)\s*(Planejado|Aprovado|Cancelado)?", re.IGNORECASE
 )
@@ -112,8 +117,13 @@ def parse_int(value: str):
 
 def normalize_pdf_text(text: str) -> str:
     text = text.replace("\x0c", "\n")
+    # FIX: (?!\s*:) evita quebrar em nova linha uma ocorrência de
+    # "META ESPECÍFICA N" que é, na verdade, parte do texto de uma
+    # Descrição (ex.: "Descrição: META ESPECÍFICA 1: Adquirir...").
+    # Cabeçalhos de meta de verdade nunca são seguidos por ":" logo
+    # após o número.
     text = re.sub(
-        rf"({META_HEADER_PATTERN}\s+\d+)", r"\n\1\n", text, flags=re.IGNORECASE
+        rf"({META_HEADER_PATTERN}\s+\d+)(?!\s*:)", r"\n\1\n", text, flags=re.IGNORECASE
     )
     text = re.sub(
         r"(Item\s*\d+\s*(?:Planejado|Aprovado|Cancelado)?)",
@@ -306,7 +316,7 @@ INDICADOR_GERAL_MARKER_RE = re.compile(
 )
 VALOR_REFERENCIA_RE = re.compile(r"valor de refer[eê]ncia\s*:", re.IGNORECASE)
 META_ESPECIFICA_LINE_RE = re.compile(
-    rf"^{META_HEADER_PATTERN}\s+(\d+)", re.IGNORECASE
+    rf"^{META_HEADER_PATTERN}\s+(\d+)(?!\s*:)", re.IGNORECASE
 )
 SECTION_LABEL_PATTERNS = [
     ("descricao_indicador", re.compile(r"^Descri[cç][aã]o do Indicador:\s*(.*)", re.IGNORECASE)),
@@ -1344,7 +1354,7 @@ def build_rows(parsed_items, header_map):
 
 def main():
     parser = argparse.ArgumentParser(description="Preenche planilha a partir do PDF.")
-    parser.add_argument("--pdf", default="Planos de Aplicação.pdf", help="PDF de entrada")
+    parser.add_argument("--pdf", default="Planos de Aplicação.pdf", help="PDF de entrada")
     parser.add_argument(
         "--xlsx",
         default=REQUIRED_TEMPLATE_NAME,
