@@ -416,6 +416,14 @@ def extract_indicador_geral_completo(lines) -> str:
                 skip_ex_block = True
                 continue
             if skip_ex_block:
+                # FIX: a line ending in ")" closes the EX parenthetical
+                # example — turn off the skip flag so the REAL value that
+                # follows (e.g. "Não se aplica.") is not swallowed too.
+                # The closing line itself is still example content, so it
+                # is not appended.
+                if next_line.rstrip().endswith(")"):
+                    skip_ex_block = False
+                    continue
                 # A line that closes a parenthesis block is still part of EX.
                 if re.match(r"^[^A-Za-záéíóúàâãêôçÁÉÍÓÚÀÂÃÊÔÇ]", next_line):
                     continue
@@ -992,13 +1000,14 @@ def _ensure_analysis_blocks(ws, required_blocks: int):
 def _apply_token_or_keep_default(base_text: str, token: str, value: str) -> str:
     """Replace a `token*...token*` placeholder segment with `value`.
 
-    FIX: if `value` is blank, the cell is left completely untouched so the
-    standard/default text already authored in the Base template is
-    preserved verbatim — it must never be wiped out to an empty string.
+    The `token*...token*` markers always wrap FICTIONAL example content
+    (guidance text for a human analyst) — it must never survive into a
+    generated document. If `value` is blank, the example text between the
+    markers is removed (replaced with an empty string), but the standard
+    surrounding phrase (e.g. "SIM. A Meta informada foi:" / "Existe
+    aderência...") is always kept untouched.
     """
     value = blank_if_dash_only(value)
-    if not value:
-        return base_text
     return replace_placeholder_segment(base_text, token, value)
 
 
