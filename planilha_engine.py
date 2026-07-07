@@ -989,26 +989,39 @@ def _ensure_analysis_blocks(ws, required_blocks: int):
         _copy_analysis_block(ws, ANALYSIS_BLOCK_START_ROW, dst_start_row, block_height)
 
 
+def _apply_token_or_keep_default(base_text: str, token: str, value: str) -> str:
+    """Replace a `token*...token*` placeholder segment with `value`.
+
+    FIX: if `value` is blank, the cell is left completely untouched so the
+    standard/default text already authored in the Base template is
+    preserved verbatim — it must never be wiped out to an empty string.
+    """
+    value = blank_if_dash_only(value)
+    if not value:
+        return base_text
+    return replace_placeholder_segment(base_text, token, value)
+
+
 def fill_analysis_template(ws, lines):
     analysis_data = extract_analysis_data(lines)
     indicador_geral = analysis_data["zero_indicador_geral"]
     meta_geral = analysis_data["one_meta_geral"]
-    valor_referencia = analysis_data["three_valor_referencia"]
     sections = analysis_data["sections"]
 
     base_a8 = str(ws["A8"].value or "")
-    a8_replaced = replace_placeholder_segment(base_a8, "1*", meta_geral)
+    a8_replaced = _apply_token_or_keep_default(base_a8, "1*", meta_geral)
     if a8_replaced != base_a8:
         ws["A8"] = a8_replaced
-    elif meta_geral:
+    elif meta_geral and "1*" not in base_a8:
+        # Template has no token to anchor on but a real value exists.
         ws["A8"] = meta_geral
     set_cell_font_black(ws, "A8")
 
     base_f10 = str(ws["F10"].value or "")
-    f10_replaced = replace_placeholder_segment(base_f10, "0*", indicador_geral)
+    f10_replaced = _apply_token_or_keep_default(base_f10, "0*", indicador_geral)
     if f10_replaced != base_f10:
         ws["F10"] = f10_replaced
-    elif indicador_geral:
+    elif indicador_geral and "0*" not in base_f10:
         ws["F10"] = indicador_geral
     set_cell_font_black(ws, "F10")
 
@@ -1031,65 +1044,64 @@ def fill_analysis_template(ws, lines):
 
         cell_a = f"A{start_row}"
         base_a = str(ws[cell_a].value or "")
-        a_replaced = replace_placeholder_segment(base_a, "2*", two_meta_texto)
-        ws[cell_a] = a_replaced if a_replaced != base_a else two_meta_texto
+        if meta_text:
+            a_replaced = replace_placeholder_segment(base_a, "2*", two_meta_texto)
+            ws[cell_a] = a_replaced if a_replaced != base_a else two_meta_texto
+        # else: keep the default template text in column A untouched.
 
+        # Coluna E — Valor de Referência/Fonte: usa exclusivamente o valor
+        # específico da própria Meta Específica no PDF. Não faz mais
+        # fallback para a referência geral do plano — isso misturava o
+        # indicador geral com metas que não têm referência própria.
         cell_e = f"E{start_row}"
         base_e = str(ws[cell_e].value or "")
-        # Prefer the section-specific "Valor de Referência/Fonte" over the
-        # global indicator reference — each Meta Específica declares its own.
         section_fonte = blank_if_dash_only(section.get("fonte_ano", ""))
-        e_reference = section_fonte or valor_referencia
-        e_replaced = replace_placeholder_segment(base_e, "3*", e_reference)
-        if e_replaced == base_e:
-            e_replaced = _inject_reference_text(base_e, e_reference)
+        e_replaced = _apply_token_or_keep_default(base_e, "3*", section_fonte)
+        if e_replaced == base_e and section_fonte and "3*" not in base_e:
+            e_replaced = _inject_reference_text(base_e, section_fonte)
         ws[cell_e] = e_replaced
 
+        # Coluna F — Descrição do Indicador + Fórmula: cada marcador (4*/5*)
+        # só é substituído se o respectivo campo tiver valor; se um dos dois
+        # (ou ambos) estiver em branco, o texto padrão daquele marcador
+        # permanece intacto.
         cell_f = f"F{start_row}"
         base_f = str(ws[cell_f].value or "")
-        f_replaced = replace_placeholder_segment(base_f, "4*", section.get("descricao_indicador", ""))
-        f_replaced = replace_placeholder_segment(f_replaced, "5*", section.get("formula", ""))
-        if f_replaced == base_f:
-            f_replaced = _inject_descricao_formula(
-                base_f,
-                section.get("descricao_indicador", ""),
-                section.get("formula", ""),
-            )
+        descricao_val = blank_if_dash_only(section.get("descricao_indicador", ""))
+        formula_val = blank_if_dash_only(section.get("formula", ""))
+        f_step1 = _apply_token_or_keep_default(base_f, "4*", descricao_val)
+        f_replaced = _apply_token_or_keep_default(f_step1, "5*", formula_val)
+        if (
+            f_replaced == base_f
+            and (descricao_val or formula_val)
+            and "4*" not in base_f
+            and "5*" not in base_f
+        ):
+            f_replaced = _inject_descricao_formula(base_f, descricao_val, formula_val)
         ws[cell_f] = f_replaced
 
         cell_g = f"G{start_row}"
         base_g = str(ws[cell_g].value or "")
-        g_replaced = replace_placeholder_segment(base_g, "6*", section.get("meta_pesp", ""))
-        if g_replaced == base_g:
-            g_replaced = _inject_meta_text(
-                base_g,
-                "A Meta informada foi:",
-                section.get("meta_pesp", ""),
-            )
+        meta_pesp_val = blank_if_dash_only(section.get("meta_pesp", ""))
+        g_replaced = _apply_token_or_keep_default(base_g, "6*", meta_pesp_val)
+        if g_replaced == base_g and meta_pesp_val and "6*" not in base_g:
+            g_replaced = _inject_meta_text(base_g, "A Meta informada foi:", meta_pesp_val)
         ws[cell_g] = g_replaced
 
         cell_h = f"H{start_row}"
         base_h = str(ws[cell_h].value or "")
-        h_replaced = replace_placeholder_segment(base_h, "7*", section.get("meta_pnsp", ""))
-        if h_replaced == base_h:
-            h_replaced = _inject_meta_text(
-                base_h,
-                "A Meta informada foi:",
-                section.get("meta_pnsp", ""),
-            )
+        meta_pnsp_val = blank_if_dash_only(section.get("meta_pnsp", ""))
+        h_replaced = _apply_token_or_keep_default(base_h, "7*", meta_pnsp_val)
+        if h_replaced == base_h and meta_pnsp_val and "7*" not in base_h:
+            h_replaced = _inject_meta_text(base_h, "A Meta informada foi:", meta_pnsp_val)
         ws[cell_h] = h_replaced
 
         cell_i = f"I{start_row}"
         base_i = str(ws[cell_i].value or "")
-        i_replaced = replace_placeholder_segment(
-            base_i, "8*", section.get("carteira_mjsp", "")
-        )
-        if i_replaced == base_i:
-            i_replaced = _inject_meta_text(
-                base_i,
-                "A política informada foi:",
-                section.get("carteira_mjsp", ""),
-            )
+        carteira_val = blank_if_dash_only(section.get("carteira_mjsp", ""))
+        i_replaced = _apply_token_or_keep_default(base_i, "8*", carteira_val)
+        if i_replaced == base_i and carteira_val and "8*" not in base_i:
+            i_replaced = _inject_meta_text(base_i, "A política informada foi:", carteira_val)
         ws[cell_i] = i_replaced
         set_row_top_fonts_black(ws, start_row, 1, 12)
 
